@@ -194,12 +194,13 @@ class ReplayBuffer():
 	Storage and sampling functionality for training TD-MPC / TOLD.
 	The replay buffer is stored in GPU memory when training from state.
 	Uses prioritized experience replay by default."""
-	def __init__(self, cfg):
+	def __init__(self, cfg, latent_plan=False):
 		self.cfg = cfg
 		self.device = torch.device(cfg.device)
 		self.capacity = min(cfg.train_steps, cfg.max_buffer_size)
-		dtype = torch.float32 if cfg.modality == 'state' else torch.uint8
-		obs_shape = cfg.obs_shape if cfg.modality == 'state' else (3, *cfg.obs_shape[-2:])
+		dtype = torch.float32
+		if cfg.modality == 'state':
+			obs_shape = cfg.obs_shape
 		self._obs = torch.empty((self.capacity+1, *obs_shape), dtype=dtype, device=self.device)
 		self._last_obs = torch.empty((self.capacity//cfg.episode_length, *cfg.obs_shape), dtype=dtype, device=self.device)
 		self._action = torch.empty((self.capacity, cfg.action_dim), dtype=torch.float32, device=self.device)
@@ -208,6 +209,12 @@ class ReplayBuffer():
 		self._eps = 1e-6
 		self._full = False
 		self.idx = 0
+		if not latent_plan:
+			self.batch_size = int(self.cfg.batch_size * self.cfg.horizon)
+			self.horizon = 0
+		else:
+			self.batch_size = self.cfg.batch_size
+			self.horizon = self.cfg.horizon
 
 	def __add__(self, episode: Episode):
 		self.add(episode)
@@ -235,7 +242,7 @@ class ReplayBuffer():
 	def _get_obs(self, arr, idxs):
 		if self.cfg.modality == 'state':
 			return arr[idxs]
-		obs = torch.empty((self.cfg.batch_size, 3*self.cfg.frame_stack, *arr.shape[-2:]), dtype=arr.dtype, device=torch.device('cuda'))
+		obs = torch.empty((self.batch_size, 3*self.cfg.frame_stack, *arr.shape[-2:]), dtype=arr.dtype, device=torch.device('cuda'))
 		obs[:, -3:] = arr[idxs].cuda()
 		_idxs = idxs.clone()
 		mask = torch.ones_like(_idxs, dtype=torch.bool)
@@ -249,16 +256,16 @@ class ReplayBuffer():
 		probs = (self._priorities if self._full else self._priorities[:self.idx]) ** self.cfg.per_alpha
 		probs /= probs.sum()
 		total = len(probs)
-		idxs = torch.from_numpy(np.random.choice(total, self.cfg.batch_size, p=probs.cpu().numpy(), replace=not self._full)).to(self.device)
+		idxs = torch.from_numpy(np.random.choice(total, self.batch_size, p=probs.cpu().numpy(), replace=not self._full)).to(self.device)
 		weights = (total * probs[idxs]) ** (-self.cfg.per_beta)
 		weights /= weights.max()
 
 		obs = self._get_obs(self._obs, idxs)
 		next_obs_shape = self._last_obs.shape[1:] if self.cfg.modality == 'state' else (3*self.cfg.frame_stack, *self._last_obs.shape[-2:])
-		next_obs = torch.empty((self.cfg.horizon+1, self.cfg.batch_size, *next_obs_shape), dtype=obs.dtype, device=obs.device)
-		action = torch.empty((self.cfg.horizon+1, self.cfg.batch_size, *self._action.shape[1:]), dtype=torch.float32, device=self.device)
-		reward = torch.empty((self.cfg.horizon+1, self.cfg.batch_size), dtype=torch.float32, device=self.device)
-		for t in range(self.cfg.horizon+1):
+		next_obs = torch.empty((self.horizon+1, self.batch_size, *next_obs_shape), dtype=obs.dtype, device=obs.device)
+		action = torch.empty((self.horizon+1, self.batch_size, *self._action.shape[1:]), dtype=torch.float32, device=self.device)
+		reward = torch.empty((self.horizon+1, self.batch_size), dtype=torch.float32, device=self.device)
+		for t in range(self.horizon+1):
 			_idxs = idxs + t
 			next_obs[t] = self._get_obs(self._obs, _idxs+1)
 			action[t] = self._action[_idxs]
