@@ -40,9 +40,10 @@ mlp_dim: 512
 latent_dim: 50
 
 # wandb (insert your own)
-use_wandb: false
-wandb_project: none
-wandb_entity: none
+use_wandb: true
+wandb_project: MoPAC
+wandb_entity: Slientea98
+wandb_exp_name: 1029_humanoid-run-mopac
 
 # misc
 seed: 1

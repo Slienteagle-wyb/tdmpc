@@ -211,7 +211,7 @@ class MoPAC():
     @torch.no_grad()
     def _td_target(self, next_obs, reward):
         """Compute the TD-target from a reward and the observation at the following time step."""
-        next_z = self.model.h(self.aug(next_obs))
+        next_z = self.model.h(next_obs)
         td_target = reward + self.cfg.discount * \
                     torch.min(*self.model_target.Q(next_z, self.model.pi(next_z, self.cfg.min_std)))
         return td_target
@@ -242,9 +242,9 @@ class MoPAC():
             Q1_model, Q2_model = self.model.Q(model_z, plan_action[t])
             model_z, reward_pred = self.model.next(model_z, plan_action[t])
             with torch.no_grad():
-                next_obs = self.aug(next_model_obses[t])
-                next_model_z = self.model_target.h(next_obs)
-                td_target_model = self._td_target(next_obs, reward_pred)
+                next_model_obs = self.aug(next_model_obses[t])
+                next_model_z = self.model_target.h(next_model_obs)
+                td_target_model = self._td_target(next_model_obs, plan_reward[t])
             model_zs.append(model_z.detach())
             # Losses from latent model by mppi
             rho = (self.cfg.rho ** t)
@@ -253,18 +253,25 @@ class MoPAC():
             value_loss_plan += rho * (h.mse(Q1_model, td_target_model) + h.mse(Q2_model, td_target_model))
             priority_loss += rho * (h.l1(Q1_model, td_target_model) + h.l1(Q2_model, td_target_model))
 
-        # env data for actor critic policy training
+        # env data for actor critic policy training and model learning
         Q1, Q2 = self.model.Q(z, action[0])
-        td_target = self._td_target(next_obses[0], reward[0])
+        z, env_reward_pred = self.model.next(z, action[0])
+        with torch.no_grad():
+            next_obs = self.aug(next_obses[0])
+            next_z = self.model_target.h(next_obs)
+        env_reward_loss = h.mse(env_reward_pred, reward[0]).mean()
+        consistency_loss_env = h.mse(z, next_z).mean()
+        td_target = self._td_target(next_obs, reward[0])
         value_loss = h.mse(Q1, td_target) + h.mse(Q2, td_target)
 
         # calculate the dyna model loss using priority
-
         dyna_model_loss = self.cfg.consistency_coef * consistency_loss_plan.clamp(max=1e4) + \
-                          self.cfg.reward_coef * reward_loss.clamp(max=1e4) + self.cfg.value_coef * value_loss_plan.clamp(max=1e4)
+            self.cfg.reward_coef * reward_loss.clamp(max=1e4) + self.cfg.value_coef * value_loss_plan.clamp(max=1e4)
         weighted_dyna_model_loss = (weights * dyna_model_loss).mean()
         # calculate the critic loss
-        weighted_total_loss = weighted_dyna_model_loss + self.cfg.value_coef * value_loss.clamp(max=1e4).mean()
+        env_model_loss = self.cfg.consistency_coef * consistency_loss_env.clamp(max=1e4) + \
+            self.cfg.reward_coef * env_reward_loss.clamp(max=1e4) + self.cfg.value_coef * value_loss.clamp(max=1e4).mean()
+        weighted_total_loss = weighted_dyna_model_loss + env_model_loss
         weighted_total_loss.register_hook(lambda grad: grad * (1 / self.cfg.horizon))
         weighted_total_loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip_norm,
@@ -278,12 +285,15 @@ class MoPAC():
             h.ema(self.model, self.model_target, self.cfg.tau)
 
         self.model.eval()
-        return {'consistency_loss': float(consistency_loss_plan.mean().item()),
-                'reward_loss': float(reward_loss.mean().item()),
+        return {'consistency_loss_plan': float(consistency_loss_plan.mean().item()),
+                'consistency_loss_env': float(consistency_loss_env.item()),
+                'reward_loss_plan': float(reward_loss.mean().item()),
+                'reward_loss_env': float(env_reward_loss.item()),
                 'value_loss': float(value_loss.mean().item()),
                 'value_loss_plan': float(value_loss_plan.mean().item()),
                 'pi_loss': pi_loss,
                 'pi_loss_model': pi_loss_model,
                 'dyna_model_loss': float(dyna_model_loss.mean().item()),
+                'env_model_loss': float(env_model_loss.item()),
                 'weighted_loss': float(weighted_total_loss.item()),
                 'grad_norm': float(grad_norm)}
