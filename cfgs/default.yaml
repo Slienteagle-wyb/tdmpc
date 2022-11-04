@@ -40,15 +40,15 @@ mlp_dim: 512
 latent_dim: 50
 
 # wandb (insert your own)
-use_wandb: false
+use_wandb: true
 wandb_project: MoPAC
 wandb_entity: Slientea98
-wandb_exp_name: 1104_humanoid_run_env_horizon1
+wandb_exp_name: 1104_humanoid_run_mopac
 
 # misc
-seed: 0
+seed: 10
 env_horizon: 0  # 0 if normal transition
-exp_name: debug
+exp_name: default
 eval_freq: 20000
 eval_episodes: 10
 save_video: false

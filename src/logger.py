@@ -5,11 +5,12 @@ import re
 import numpy as np
 import torch
 import pandas as pd
+from pathlib import Path
 from termcolor import colored
 from omegaconf import OmegaConf
 
-
-CONSOLE_FORMAT = [('episode', 'E', 'int'), ('env_step', 'S', 'int'), ('episode_reward', 'R', 'float'), ('total_time', 'T', 'time')]
+CONSOLE_FORMAT = [('episode', 'E', 'int'), ('env_step', 'S', 'int'), ('episode_reward', 'R', 'float'),
+				  ('total_time', 'T', 'time')]
 AGENT_METRICS = ['consistency_loss', 'reward_loss', 'value_loss', 'total_loss', 'weighted_loss', 'pi_loss', 'grad_norm']
 
 
@@ -25,21 +26,24 @@ def make_dir(dir_path):
 def print_run(cfg, reward=None):
 	"""Pretty-printing of run information. Call at start of training."""
 	prefix, color, attrs = '  ', 'green', ['bold']
+
 	def limstr(s, maxlen=32):
 		return str(s[:maxlen]) + '...' if len(str(s)) > maxlen else s
+
 	def pprint(k, v):
-		print(prefix + colored(f'{k.capitalize()+":":<16}', color, attrs=attrs), limstr(v))
+		print(prefix + colored(f'{k.capitalize() + ":":<16}', color, attrs=attrs), limstr(v))
+
 	kvs = [('task', cfg.task_title),
-		   ('train steps', f'{int(cfg.train_steps*cfg.action_repeat):,}'),
+		   ('train steps', f'{int(cfg.train_steps * cfg.action_repeat):,}'),
 		   ('observations', 'x'.join([str(s) for s in cfg.obs_shape])),
 		   ('actions', cfg.action_dim),
 		   ('experiment', cfg.exp_name)]
 	if reward is not None:
 		kvs.append(('episode reward', colored(str(int(reward)), 'white', attrs=['bold'])))
 	w = np.max([len(limstr(str(kv[1]))) for kv in kvs]) + 21
-	div = '-'*w
+	div = '-' * w
 	print(div)
-	for k,v in kvs:
+	for k, v in kvs:
 		pprint(k, v)
 	print(div)
 
@@ -52,6 +56,7 @@ def cfg_to_group(cfg, return_list=False):
 
 class VideoRecorder:
 	"""Utility class for logging evaluation videos."""
+
 	def __init__(self, root_dir, wandb, render_size=384, fps=15):
 		self.save_dir = (root_dir / 'eval_video') if root_dir else None
 		self._wandb = wandb
@@ -78,16 +83,19 @@ class VideoRecorder:
 
 class Logger(object):
 	"""Primary logger object. Logs either locally or using wandb."""
+
 	def __init__(self, log_dir, cfg):
 		self._log_dir = make_dir(log_dir)
 		self._model_dir = make_dir(self._log_dir / 'models')
+		self._src_dir = os.path.join(Path.cwd(), 'src')
 		self._save_model = cfg.save_model
 		self._group = cfg_to_group(cfg)
 		self._seed = cfg.seed
 		self._cfg = cfg
 		self._eval = []
 		print_run(cfg)
-		project, entity, name = cfg.get('wandb_project', 'none'), cfg.get('wandb_entity', 'none'), cfg.get('wandb_exp_name', 'none')
+		project, entity, name = cfg.get('wandb_project', 'none'), cfg.get('wandb_entity', 'none'), cfg.get(
+			'wandb_exp_name', 'none')
 		run_offline = not cfg.get('use_wandb', False) or project == 'none' or entity == 'none'
 		if run_offline:
 			print(colored('Logs will be saved locally.', 'yellow', attrs=['bold']))
@@ -97,12 +105,13 @@ class Logger(object):
 				os.environ["WANDB_SILENT"] = "true"
 				import wandb
 				wandb.init(project=project,
-						entity=entity,
-						name=name,
-						group=self._group,
-						tags=cfg_to_group(cfg, return_list=True) + [f'seed:{cfg.seed}'],
-						dir=self._log_dir,
-						config=OmegaConf.to_container(cfg, resolve=True))
+						   entity=entity,
+						   name=name,
+						   group=self._group,
+						   tags=cfg_to_group(cfg, return_list=True) + [f'seed:{cfg.seed}'],
+						   dir=self._log_dir,
+						   config=OmegaConf.to_container(cfg, resolve=True),
+						   settings=wandb.Settings(code_dir=self._src_dir))
 				print(colored('Logs will be synced with wandb.', 'blue', attrs=['bold']))
 				self._wandb = wandb
 			except:
@@ -119,7 +128,7 @@ class Logger(object):
 			fp = self._model_dir / f'model.pt'
 			torch.save(agent.state_dict(), fp)
 			if self._wandb:
-				artifact = self._wandb.Artifact(self._group+'-'+str(self._seed), type='model')
+				artifact = self._wandb.Artifact(self._group + '-' + str(self._seed), type='model')
 				artifact.add_file(fp)
 				self._wandb.log_artifact(artifact)
 		if self._wandb:
@@ -128,12 +137,12 @@ class Logger(object):
 
 	def _format(self, key, value, ty):
 		if ty == 'int':
-			return f'{colored(key+":", "grey")} {int(value):,}'
+			return f'{colored(key + ":", "grey")} {int(value):,}'
 		elif ty == 'float':
-			return f'{colored(key+":", "grey")} {value:.01f}'
+			return f'{colored(key + ":", "grey")} {value:.01f}'
 		elif ty == 'time':
 			value = str(datetime.timedelta(seconds=int(value)))
-			return f'{colored(key+":", "grey")} {value}'
+			return f'{colored(key + ":", "grey")} {value}'
 		else:
 			raise f'invalid log format type: {ty}'
 
@@ -147,7 +156,7 @@ class Logger(object):
 	def log(self, d, category='train'):
 		assert category in {'train', 'eval'}
 		if self._wandb is not None:
-			for k,v in d.items():
+			for k, v in d.items():
 				self._wandb.log({category + '/' + k: v}, step=d['env_step'])
 		if category == 'eval':
 			keys = ['env_step', 'episode_reward']
