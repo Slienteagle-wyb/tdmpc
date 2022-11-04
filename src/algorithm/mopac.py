@@ -237,7 +237,7 @@ class MoPAC():
         model_zs = [model_z.detach()]
 
         # plan for model based transition collection as D_model
-        consistency_loss_plan, reward_loss, value_loss, value_loss_plan, priority_loss = 0, 0, 0, 0, 0
+        consistency_loss_plan, reward_loss, value_loss_plan, priority_loss = 0, 0, 0, 0
         for t in range(self.cfg.horizon):
             Q1_model, Q2_model = self.model.Q(model_z, plan_action[t])
             model_z, reward_pred = self.model.next(model_z, plan_action[t])
@@ -254,29 +254,36 @@ class MoPAC():
             priority_loss += rho * (h.l1(Q1_model, td_target_model) + h.l1(Q2_model, td_target_model))
 
         # env data for actor critic policy training and model learning
-        Q1, Q2 = self.model.Q(z, action[0])
-        z, env_reward_pred = self.model.next(z, action[0])
-        with torch.no_grad():
-            next_obs = self.aug(next_obses[0])
-            next_z = self.model_target.h(next_obs)
-        env_reward_loss = h.mse(env_reward_pred, reward[0]).mean()
-        consistency_loss_env = h.mse(z, next_z).mean()
-        td_target = self._td_target(next_obs, reward[0])
-        value_loss = h.mse(Q1, td_target) + h.mse(Q2, td_target)
+        consistency_loss_env, reward_loss_env, value_loss, env_priority_loss = 0, 0, 0, 0
+        for t in range(self.cfg.env_horizon):
+            Q1, Q2 = self.model.Q(z, action[t])
+            z, reward_pred_env = self.model.next(z, action[t])
+            with torch.no_grad():
+                next_obs = self.aug(next_obses[t])
+                next_z = self.model_target.h(next_obs)
+                td_target = self._td_target(next_obs, reward[t])
+            env_rho = (self.cfg.rho ** t)
+            consistency_loss_env += env_rho * torch.mean(h.mse(z, next_z), dim=1, keepdim=True)
+            reward_loss_env += env_rho * h.mse(reward_pred_env, reward[t])
+            value_loss += env_rho * (h.mse(Q1, td_target) + h.mse(Q2, td_target))
+            env_priority_loss += env_rho * (h.l1(Q1, td_target) + h.l1(Q2, td_target))
 
         # calculate the dyna model loss using priority
         dyna_model_loss = self.cfg.consistency_coef * consistency_loss_plan.clamp(max=1e4) + \
             self.cfg.reward_coef * reward_loss.clamp(max=1e4) + self.cfg.value_coef * value_loss_plan.clamp(max=1e4)
-        weighted_dyna_model_loss = (weights * dyna_model_loss).mean()
+        weighted_dyna_model_loss = (model_weights * dyna_model_loss).mean()
         # calculate the critic loss
         env_model_loss = self.cfg.consistency_coef * consistency_loss_env.clamp(max=1e4) + \
-            self.cfg.reward_coef * env_reward_loss.clamp(max=1e4) + self.cfg.value_coef * value_loss.clamp(max=1e4).mean()
-        weighted_total_loss = weighted_dyna_model_loss + env_model_loss
+            self.cfg.reward_coef * reward_loss_env.clamp(max=1e4) + self.cfg.value_coef * value_loss.clamp(max=1e4).mean()
+        weighted_env_model_loss = (weights * env_model_loss).mean()
+        weighted_total_loss = weighted_dyna_model_loss + weighted_env_model_loss
         weighted_total_loss.register_hook(lambda grad: grad * (1 / self.cfg.horizon))
         weighted_total_loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip_norm,
                                                    error_if_nonfinite=False)
         self.optim.step()
+        env_buffer.update_priorities(idxs, env_priority_loss.clamp(max=1e4).detach())
+        model_buffer.update_priorities(plan_idxs, priority_loss.clamp(max=1e4).detach())
 
         pi_loss_model = self.update_pi(model_zs)
         pi_loss = self.update_pi(zs)
@@ -286,14 +293,14 @@ class MoPAC():
 
         self.model.eval()
         return {'consistency_loss_plan': float(consistency_loss_plan.mean().item()),
-                'consistency_loss_env': float(consistency_loss_env.item()),
+                'consistency_loss_env': float(consistency_loss_env.mean().item()),
                 'reward_loss_plan': float(reward_loss.mean().item()),
-                'reward_loss_env': float(env_reward_loss.item()),
+                'reward_loss_env': float(reward_loss_env.mean().item()),
                 'value_loss': float(value_loss.mean().item()),
                 'value_loss_plan': float(value_loss_plan.mean().item()),
                 'pi_loss': pi_loss,
                 'pi_loss_model': pi_loss_model,
                 'dyna_model_loss': float(dyna_model_loss.mean().item()),
-                'env_model_loss': float(env_model_loss.item()),
+                'env_model_loss': float(env_model_loss.mean().item()),
                 'weighted_loss': float(weighted_total_loss.item()),
                 'grad_norm': float(grad_norm)}
