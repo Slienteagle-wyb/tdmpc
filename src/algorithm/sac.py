@@ -30,8 +30,8 @@ class Agent(nn.Module):
         return self._soft_q1_target(x), self._soft_q2_target(x)
 
     def update_target(self):
-        h.ema(self._soft_q1, self._soft_q1_target, self.cfg.tau)
-        h.ema(self._soft_q2, self._soft_q2_target, self.cfg.tau)
+        h.ema(self._soft_q1, self._soft_q1_target, self.cfg.sac_tau)
+        h.ema(self._soft_q2, self._soft_q2_target, self.cfg.sac_tau)
 
     @property
     def q1_parameters(self):

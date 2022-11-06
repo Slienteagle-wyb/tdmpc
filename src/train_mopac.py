@@ -78,7 +78,7 @@ def train(cfg):
             model_obs = torch.tensor(model_obs, dtype=torch.float32, device=cfg.device).unsqueeze(0)
             with torch.no_grad():
                 z = agent.model.h(obs)
-                pi_action = agent.model.pi(z, cfg.min_std)
+                pi_action = agent.model.pi(z, agent.std)
                 model_z = agent.model.h(model_obs)
                 plan_action = agent.latent_plan(model_z, step=step, t0=model_episode.first)
             obs, reward, done, _ = env.step(pi_action.detach().cpu().numpy())
@@ -92,9 +92,9 @@ def train(cfg):
         train_metrics = {}
         if step >= cfg.seed_steps:
             num_updates = cfg.seed_steps if step == cfg.seed_steps else cfg.episode_length
-            # num_updates = int(num_updates / cfg.update_freq)
+            num_updates = int(num_updates / cfg.update_freq)
             for i in range(num_updates):
-                train_metrics.update(agent.update(env_buffer, model_buffer, step + i))
+                train_metrics.update(agent.update_interval(env_buffer, model_buffer, step + i))
 
         # Log training episode
         episode_idx += 1

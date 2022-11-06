@@ -60,7 +60,7 @@ class MoPAC():
         self.model = TOLD(cfg).cuda()
         self.model_target = deepcopy(self.model)
         self.optim = torch.optim.Adam(self.model.parameters(), lr=self.cfg.lr)
-        self.pi_optim = torch.optim.Adam(self.model._pi.parameters(), lr=self.cfg.lr)
+        self.pi_optim = torch.optim.Adam(self.model._pi.parameters(), lr=self.cfg.pi_lr)
         self.aug = h.RandomShiftsAug(cfg)
         self.model.eval()
         self.model_target.eval()
@@ -243,8 +243,60 @@ class MoPAC():
             reward_loss += rho * h.mse(reward_pred, rewards[t])  # (batch, 1)
             value_loss += rho * (h.mse(q1, td_target) + h.mse(q2, td_target))  # (batch, 1)
             priority_loss += rho * (h.l1(q1, td_target) + h.l1(q2, td_target))
-        buffer.update_priorities(idxs, priority_loss.clamp(max=1e4).detach())
+        # buffer.update_priorities(idxs, priority_loss.clamp(max=1e4).detach())
         return zs, consistency_loss, reward_loss, value_loss, weights
+
+    def update_interval(self, env_buffer, plan_buffer, step):
+        """Main update function. Corresponds to one iteration of the TOLD model learning."""
+        self.std = h.linear_schedule(self.cfg.std_schedule, step)
+        self.model.train()
+
+        # model loss using datas sampled by planning
+        zs_plan, consistency_loss_plan, reward_loss_plan, value_loss_plan, weights_plan = \
+            self.recurrent_loss(plan_buffer, self.cfg.horizon)
+        dyna_model_loss = self.cfg.consistency_coef * consistency_loss_plan.clamp(max=1e4) + \
+            self.cfg.reward_coef * reward_loss_plan.clamp(
+            max=1e4) + self.cfg.value_coef * value_loss_plan.clamp(max=1e4)
+        weighted_dyna_model_loss = (weights_plan * dyna_model_loss).mean()
+        self.optim.zero_grad(set_to_none=True)
+        weighted_dyna_model_loss.register_hook(lambda grad: grad * (1 / self.cfg.horizon))
+        weighted_dyna_model_loss.backward()
+        grad_norm_plan = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip_norm,
+                                                        error_if_nonfinite=False)
+        self.optim.step()
+        pi_loss_plan = self.update_pi(zs_plan)
+
+        # model loss using datas sampled by pi
+        zs_env, consistency_loss_env, reward_loss_env, value_loss_env, weights_env = \
+            self.recurrent_loss(env_buffer, self.cfg.env_horizon)
+        env_model_loss = self.cfg.consistency_coef * consistency_loss_env.clamp(max=1e4) + \
+            self.cfg.reward_coef * reward_loss_env.clamp(max=1e4) + self.cfg.value_coef * value_loss_env.clamp(max=1e4)
+        weighted_env_model_loss = (weights_env * env_model_loss).mean()
+        self.optim.zero_grad(set_to_none=True)
+        weighted_env_model_loss.backward()
+        grad_norm_env = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip_norm,
+                                                       error_if_nonfinite=False)
+        self.optim.step()
+        pi_loss = self.update_pi([zs_env[0]])
+
+        weighted_total_loss = weighted_dyna_model_loss + weighted_env_model_loss
+        # Update policy + target network
+        if step % self.cfg.update_freq == 0:
+            h.ema(self.model, self.model_target, self.cfg.tau)
+        self.model.eval()
+        return {'consistency_loss_plan': float(consistency_loss_plan.mean().item()),
+                'consistency_loss_env': float(consistency_loss_env.mean().item()),
+                'reward_loss_plan': float(reward_loss_plan.mean().item()),
+                'reward_loss_env': float(reward_loss_env.mean().item()),
+                'value_loss': float(value_loss_plan.mean().item()),
+                'value_loss_plan': float(value_loss_plan.mean().item()),
+                'pi_loss': pi_loss,
+                'pi_loss_model': pi_loss_plan,
+                'dyna_model_loss': float(dyna_model_loss.mean().item()),
+                'env_model_loss': float(env_model_loss.mean().item()),
+                'weighted_loss': float(weighted_total_loss.item()),
+                'grad_norm_plan': float(grad_norm_plan),
+                'grad_norm_env': float(grad_norm_env)}
 
     def update(self, env_buffer, plan_buffer, step):
         """Main update function. Corresponds to one iteration of the TOLD model learning."""
@@ -259,11 +311,13 @@ class MoPAC():
 
         # model loss using datas sampled by planning
         dyna_model_loss = self.cfg.consistency_coef * consistency_loss_plan.clamp(max=1e4) + \
-            self.cfg.reward_coef * reward_loss_plan.clamp(max=1e4) + self.cfg.value_coef * value_loss_plan.clamp(max=1e4)
+            self.cfg.reward_coef * reward_loss_plan.clamp(
+            max=1e4) + self.cfg.value_coef * value_loss_plan.clamp(max=1e4)
         weighted_dyna_model_loss = (weights_plan * dyna_model_loss).mean()
         # model loss using datas sampled by pi
         env_model_loss = self.cfg.consistency_coef * consistency_loss_env.clamp(max=1e4) + \
-            self.cfg.reward_coef * reward_loss_env.clamp(max=1e4) + self.cfg.value_coef * value_loss_env.clamp(max=1e4)
+            self.cfg.reward_coef * reward_loss_env.clamp(
+            max=1e4) + self.cfg.value_coef * value_loss_env.clamp(max=1e4)
         weighted_env_model_loss = (weights_env * env_model_loss).mean()
 
         weighted_total_loss = weighted_dyna_model_loss + weighted_env_model_loss
@@ -274,7 +328,7 @@ class MoPAC():
         self.optim.step()
         # update policy using q function optimized by both
         pi_loss_plan = self.update_pi(zs_plan)
-        pi_loss = self.update_pi(zs_env)
+        pi_loss = self.update_pi([zs_env[0]])
 
         # Update policy + target network
         if step % self.cfg.update_freq == 0:

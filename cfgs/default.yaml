@@ -43,12 +43,12 @@ latent_dim: 50
 use_wandb: true
 wandb_project: MoPAC
 wandb_entity: Slientea98
-wandb_exp_name: 1104_humanoid_run_mopac
+wandb_exp_name: 1105_humanoid_run_sac
 
 # misc
-seed: 10
+seed: 0
 env_horizon: 0  # 0 if normal transition
-exp_name: default
+exp_name: sac
 eval_freq: 20000
 eval_episodes: 10
 save_video: false
@@ -57,5 +57,6 @@ device: 'cuda'
 
 # sac
 q_lr: 1e-3
-pi_lr: 3e-4
+pi_lr: 5e-4
 gamma: 0.99
+sac_tau: 0.005
