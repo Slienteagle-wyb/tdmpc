@@ -25,7 +25,7 @@ consistency_coef: 2
 rho: 0.5
 kappa: 0.1
 lr: 1e-3
-std_schedule: linear(0.5, ${min_std}, 25000)
+std_schedule: linear(0.5, ${min_std}, 25000)  # end at 25000 train step
 horizon_schedule: linear(1, ${horizon}, 25000)
 per_alpha: 0.6
 per_beta: 0.4
@@ -43,12 +43,12 @@ latent_dim: 50
 use_wandb: true
 wandb_project: MoPAC
 wandb_entity: Slientea98
-wandb_exp_name: 1105_humanoid_run_sac
+wandb_exp_name: 1108_quadruped_walk_mosac
 
 # misc
 seed: 0
 env_horizon: 0  # 0 if normal transition
-exp_name: sac
+exp_name: mosac
 eval_freq: 20000
 eval_episodes: 10
 save_video: false
@@ -60,3 +60,4 @@ q_lr: 1e-3
 pi_lr: 5e-4
 gamma: 0.99
 sac_tau: 0.005
+latent_policy: true

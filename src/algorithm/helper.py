@@ -143,7 +143,11 @@ def soft_q(cfg):
 class SoftActor(nn.Module):
     def __init__(self, cfg, act_fn=nn.ELU()):
         super(SoftActor, self).__init__()
-        self.fc1 = nn.Linear(cfg.obs_shape[0], cfg.mlp_dim)
+        if cfg.latent_policy:
+            in_dim = cfg.latent_dim
+        else:
+            in_dim = cfg.obs_shape[0]
+        self.fc1 = nn.Linear(in_dim, cfg.mlp_dim)
         self.act_fn1 = act_fn
         self.fc2 = nn.Linear(cfg.mlp_dim, cfg.mlp_dim)
         self.act_fn2 = act_fn

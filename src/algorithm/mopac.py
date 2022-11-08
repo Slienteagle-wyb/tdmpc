@@ -277,7 +277,10 @@ class MoPAC():
         grad_norm_env = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip_norm,
                                                        error_if_nonfinite=False)
         self.optim.step()
-        pi_loss = self.update_pi([zs_env[0]])
+        if self.cfg.env_horizon > 0:
+            pi_loss = self.update_pi(zs_env)
+        else:
+            pi_loss = self.update_pi([zs_env[0]])
 
         weighted_total_loss = weighted_dyna_model_loss + weighted_env_model_loss
         # Update policy + target network
@@ -296,7 +299,8 @@ class MoPAC():
                 'env_model_loss': float(env_model_loss.mean().item()),
                 'weighted_loss': float(weighted_total_loss.item()),
                 'grad_norm_plan': float(grad_norm_plan),
-                'grad_norm_env': float(grad_norm_env)}
+                'grad_norm_env': float(grad_norm_env),
+                'explore_std': float(self.std)}
 
     def update(self, env_buffer, plan_buffer, step):
         """Main update function. Corresponds to one iteration of the TOLD model learning."""
