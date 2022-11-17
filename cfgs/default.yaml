@@ -10,7 +10,7 @@ train_steps: 500000/${action_repeat}
 iterations: 6
 num_samples: 512
 num_elites: 64
-mixture_coef: 0.05
+mixture_coef: 0.05  # 0.05
 min_std: 0.05
 temperature: 0.5
 momentum: 0.1
@@ -22,6 +22,7 @@ horizon: 5
 reward_coef: 0.5
 value_coef: 0.1
 consistency_coef: 2
+similarity_coef: 1.0  # 0.2 for quadruped_walk
 rho: 0.5
 kappa: 0.1
 lr: 1e-3
@@ -43,21 +44,25 @@ latent_dim: 50
 use_wandb: true
 wandb_project: MoPAC
 wandb_entity: Slientea98
-wandb_exp_name: 1108_quadruped_walk_mosac
+wandb_exp_name: 1116_finger_turn_hard_similarity_1.0_ln
 
 # misc
-seed: 0
+seed: 1
 env_horizon: 0  # 0 if normal transition
-exp_name: mosac
+dream_horizon : 5
+dream_trace: 8
+exp_name: default
 eval_freq: 20000
 eval_episodes: 10
 save_video: false
 save_model: false
 device: 'cuda'
+normalize: true
+norm_type: 'ln'  # 'bn' for quadruped
 
 # sac
 q_lr: 1e-3
 pi_lr: 5e-4
 gamma: 0.99
 sac_tau: 0.005
-latent_policy: true
+latent_policy: false

@@ -12,11 +12,16 @@ class TOLD(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
-        self._encoder = h.enc(cfg)
         self._dynamics = h.mlp(cfg.latent_dim + cfg.action_dim, cfg.mlp_dim, cfg.latent_dim)
         self._reward = h.mlp(cfg.latent_dim + cfg.action_dim, cfg.mlp_dim, 1)
         self._pi = h.mlp(cfg.latent_dim, cfg.mlp_dim, cfg.action_dim)
         self._Q1, self._Q2 = h.q(cfg), h.q(cfg)
+        if self.cfg.normalize:
+            self._encoder = h.enc_norm(cfg)
+            self._predictor = h.mlp_norm(cfg.latent_dim, cfg.mlp_dim, cfg.latent_dim)
+        else:
+            self._encoder = h.enc(cfg)
+            self._predictor = h.mlp(cfg.latent_dim, cfg.mlp_dim, cfg.latent_dim)
         self.apply(h.orthogonal_init)
         for m in [self._reward, self._Q1, self._Q2]:
             m[-1].weight.data.fill_(0)
@@ -49,8 +54,11 @@ class TOLD(nn.Module):
         x = torch.cat([z, a], dim=-1)
         return self._Q1(x), self._Q2(x)
 
+    def pred_z(self, z):
+        return self._predictor(z)
 
-class TDMPC():
+
+class TDMPCSIM():
     """Implementation of TD-MPC learning + inference."""
 
     def __init__(self, cfg):
@@ -182,6 +190,14 @@ class TDMPC():
                     torch.min(*self.model_target.Q(next_z, self.model.pi(next_z, self.cfg.min_std)))
         return td_target
 
+    def similarity_loss(self, queries, keys):
+        queries = torch.cat(queries, dim=0)  # (cfg.horizon*batch_size, latent_dim)
+        queries = self.model.pred_z(queries)
+        keys = torch.cat(keys, dim=0)
+        queries_norm = F.normalize(queries, dim=-1, p=2)
+        keys_norm = F.normalize(keys, dim=-1, p=2)
+        return 2.0 - 2.0 * (queries_norm * keys_norm).sum(dim=-1)  # (cfg.horizon*batch_size, )
+
     def update(self, replay_buffer, step):
         """Main update function. Corresponds to one iteration of the TOLD model learning."""
         # obs [batch, state_dim], actions [horizon+1, batch, act_dim]
@@ -193,6 +209,7 @@ class TDMPC():
         # Representation
         z = self.model.h(self.aug(obs))
         zs = [z.detach()]
+        zs_query, zs_key = [], []
 
         consistency_loss, reward_loss, value_loss, priority_loss = 0, 0, 0, 0
         for t in range(self.cfg.horizon):
@@ -203,17 +220,22 @@ class TDMPC():
                 next_obs = self.aug(next_obses[t])
                 next_z = self.model_target.h(next_obs)
                 td_target = self._td_target(next_obs, reward[t])
+            zs_query.append(z)
+            zs_key.append(next_z.detach())
             zs.append(z.detach())
 
             # Losses
             rho = (self.cfg.rho ** t)
-            consistency_loss += rho * torch.mean(h.mse(z, next_z), dim=1, keepdim=True)
+            # consistency_loss += rho * torch.mean(h.mse(z, next_z), dim=1, keepdim=True)
             reward_loss += rho * h.mse(reward_pred, reward[t])
             value_loss += rho * (h.mse(Q1, td_target) + h.mse(Q2, td_target))
             priority_loss += rho * (h.l1(Q1, td_target) + h.l1(Q2, td_target))
 
+        similarity_loss = self.similarity_loss(zs_query, zs_key)
+        similarity_loss = similarity_loss.reshape(self.cfg.horizon, self.cfg.batch_size, -1).mean(dim=0)  # (batch_size, )
+
         # Optimize model
-        total_loss = self.cfg.consistency_coef * consistency_loss.clamp(max=1e4) + \
+        total_loss = self.cfg.similarity_coef * similarity_loss.clamp(max=1e4) + \
                      self.cfg.reward_coef * reward_loss.clamp(max=1e4) + \
                      self.cfg.value_coef * value_loss.clamp(max=1e4)
         weighted_loss = (total_loss * weights).mean()
@@ -230,7 +252,7 @@ class TDMPC():
             h.ema(self.model, self.model_target, self.cfg.tau)
 
         self.model.eval()
-        return {'consistency_loss': float(consistency_loss.mean().item()),
+        return {'consistency_loss': float(similarity_loss.mean().item()),
                 'reward_loss': float(reward_loss.mean().item()),
                 'value_loss': float(value_loss.mean().item()),
                 'pi_loss': pi_loss,

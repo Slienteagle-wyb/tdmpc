@@ -64,7 +64,7 @@ def train(cfg):
     # Run training
     L = logger.Logger(work_dir, cfg)
     episode_idx, start_time = 0, time.time()
-    for step in range(0, cfg.train_steps + cfg.episode_length, cfg.episode_length):
+    for step in range(0, cfg.train_steps + cfg.episode_length, 2 * cfg.episode_length):
 
         # Collect trajectory from the environment using optimized policy (actor-critic)
         obs = env.reset()
@@ -91,7 +91,7 @@ def train(cfg):
         train_metrics = {}
         if step >= cfg.seed_steps:
             num_updates = cfg.seed_steps if step == cfg.seed_steps else cfg.episode_length
-            num_updates = int(num_updates / cfg.update_freq)
+            # num_updates = int(num_updates / cfg.update_freq)
             for i in range(num_updates):
                 train_metrics.update(agent.update_interval(env_buffer, model_buffer, step + i))
 

@@ -13,6 +13,7 @@ from pathlib import Path
 from cfg import parse_cfg
 from env import make_env
 from algorithm.tdmpc import TDMPC
+from algorithm.tdmpc_similarity import TDMPCSIM
 from algorithm.helper import Episode, ReplayBuffer
 import logger
 torch.backends.cudnn.benchmark = True
@@ -43,12 +44,34 @@ def evaluate(env, agent, num_episodes, step, env_step, video):
 	return np.nanmean(episode_rewards)
 
 
+def evaluate_pi(env, agent, num_episodes, step, env_step, video):
+	"""Evaluate a trained agent and optionally save a video."""
+	episode_rewards = []
+	for i in range(num_episodes):
+		obs, done, ep_reward, t = env.reset(), False, 0, 0
+		if video:
+			video.init(env, enabled=(i == 0))
+		while not done:
+			obs = torch.tensor(obs, dtype=torch.float32, device='cuda').unsqueeze(0)
+			action = agent.model.pi(agent.model.h(obs))
+			obs, reward, done, _ = env.step(action.detach().cpu().numpy())
+			ep_reward += reward
+			if video:
+				video.record(env)
+			t += 1
+		episode_rewards.append(ep_reward)
+		if video:
+			video.save(env_step)
+	return np.nanmean(episode_rewards)
+
+
 def train(cfg):
 	"""Training script for TD-MPC. Requires a CUDA-enabled device."""
 	assert torch.cuda.is_available()
 	set_seed(cfg.seed)
 	work_dir = Path().cwd() / __LOGS__ / cfg.task / cfg.modality / cfg.exp_name / str(cfg.seed)
-	env, agent, buffer = make_env(cfg), TDMPC(cfg), ReplayBuffer(cfg)
+	# env, agent, buffer = make_env(cfg), TDMPC(cfg), ReplayBuffer(cfg, latent_plan=True)
+	env, agent, buffer = make_env(cfg), TDMPCSIM(cfg), ReplayBuffer(cfg, latent_plan=True)
 	
 	# Run training
 	L = logger.Logger(work_dir, cfg)

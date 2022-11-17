@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from copy import deepcopy
 from torch import distributions as pyd
 from torch.distributions.utils import _standard_normal
 
@@ -116,6 +117,24 @@ def enc(cfg):
     return nn.Sequential(*layers)
 
 
+def enc_norm(cfg):
+    """Returns a TOLD encoder."""
+    if cfg.modality == 'pixels':
+        C = int(3 * cfg.frame_stack)
+        layers = [NormalizeImg(),
+                  nn.Conv2d(C, cfg.num_channels, 7, stride=2), nn.BatchNorm2d(cfg.num_channels), nn.ReLU(),
+                  nn.Conv2d(cfg.num_channels, cfg.num_channels, 5, stride=2), nn.BatchNorm2d(cfg.num_channels), nn.ReLU(),
+                  nn.Conv2d(cfg.num_channels, cfg.num_channels, 3, stride=2), nn.BatchNorm2d(cfg.num_channels), nn.ReLU(),
+                  nn.Conv2d(cfg.num_channels, cfg.num_channels, 3, stride=2), nn.BatchNorm2d(cfg.num_channels), nn.ReLU()]
+        out_shape = _get_out_shape((C, cfg.img_size, cfg.img_size), layers)
+        layers.extend([Flatten(), nn.Linear(np.prod(out_shape), cfg.latent_dim)])
+    else:
+        norm = init_normalization(cfg.enc_dim, type_id=cfg.norm_type, one_d=True)
+        layers = [nn.Linear(cfg.obs_shape[0], cfg.enc_dim), norm, nn.ELU(),
+                  nn.Linear(cfg.enc_dim, cfg.latent_dim)]
+    return nn.Sequential(*layers)
+
+
 def mlp(in_dim, mlp_dim, out_dim, act_fn=nn.ELU()):
     """Returns an MLP."""
     if isinstance(mlp_dim, int):
@@ -124,6 +143,14 @@ def mlp(in_dim, mlp_dim, out_dim, act_fn=nn.ELU()):
         nn.Linear(in_dim, mlp_dim[0]), act_fn,
         nn.Linear(mlp_dim[0], mlp_dim[1]), act_fn,
         nn.Linear(mlp_dim[1], out_dim))
+
+
+def mlp_norm(in_dim, hidden_dim, out_dim, act_fn=nn.ELU(), norm_type='bn'):
+    norm = init_normalization(hidden_dim, type_id=norm_type, one_d=True)
+    return nn.Sequential(
+        nn.Linear(in_dim, hidden_dim), norm, act_fn,
+        nn.Linear(hidden_dim, out_dim)
+    )
 
 
 def q(cfg, act_fn=nn.ELU()):
@@ -239,22 +266,39 @@ class Episode(object):
         self._idx += 1
 
 
-class ReplayBuffer():
+class ModelRollout(Episode):
+    def __init__(self, cfg, init_latent):
+        super(ModelRollout, self).__init__(cfg, init_latent)
+        dtype = torch.float32 if cfg.modality == 'state' else torch.uint8
+        self.obs = torch.empty((cfg.horizon+1, *init_latent.shape), dtype=dtype, device=self.device)
+        self.obs[0] = torch.tensor(init_latent, dtype=dtype, device=self.device)
+        self.action = torch.empty((cfg.horizon, cfg.dream_trace, cfg.action_dim), dtype=torch.float32, device=cfg.device)
+        self.reward = torch.empty((cfg.horizon, cfg.dream_trace, 1), dtype=torch.float32, device=cfg.device)
+
+    def add(self, z_dream, action, reward_pred, done):
+        self.obs[self._idx+1] = z_dream
+        self.action[self._idx] = action
+        self.done = done
+        self._idx += 1
+
+
+class ReplayBuffer:
     """
-	Storage and sampling functionality for training TD-MPC / TOLD.
-	The replay buffer is stored in GPU memory when training from state.
-	Uses prioritized experience replay by default."""
+    Storage and sampling functionality for training TD-MPC / TOLD.
+    The replay buffer is stored in GPU memory when training from state.
+    Uses prioritized experience replay by default.
+    """
 
     def __init__(self, cfg, latent_plan=False):
-        self.cfg = cfg
+        self.cfg = deepcopy(cfg)
         self.device = torch.device(cfg.device)
         self.capacity = min(cfg.train_steps, cfg.max_buffer_size)
         dtype = torch.float32
         if cfg.modality == 'state':
             obs_shape = cfg.obs_shape
         self._obs = torch.empty((self.capacity + 1, *obs_shape), dtype=dtype, device=self.device)
-        self._last_obs = torch.empty((self.capacity // cfg.episode_length, *cfg.obs_shape), dtype=dtype,
-                                     device=self.device)
+        self._last_obs = torch.empty((self.capacity // self.cfg.episode_length, *cfg.obs_shape), dtype=dtype,
+                                     device=self.device)  # last obs of an episodic trajectory
         self._action = torch.empty((self.capacity, cfg.action_dim), dtype=torch.float32, device=self.device)
         self._reward = torch.empty((self.capacity,), dtype=torch.float32, device=self.device)
         self._priorities = torch.ones((self.capacity,), dtype=torch.float32, device=self.device)
@@ -338,11 +382,61 @@ class ReplayBuffer():
         return obs, next_obs, action, reward.unsqueeze(2), idxs, weights
 
 
+class RolloutBuffer:
+    def __init__(self, cfg):
+        self.cfg = deepcopy(cfg)
+        self.device = torch.device(cfg.device)
+        self.capacity = int(min(cfg.train_steps, cfg.max_buffer_size) / self.cfg.dream_trace)
+        self._obs = torch.empty((self.capacity + 1, cfg.dream_trace, cfg.latent_dim), dtype=torch.float32,
+                                device=self.device)
+        self._last_obs = torch.empty((self.capacity // self.cfg.horizon, cfg.dream_trace, cfg.latent_dim),
+                                     dtype=torch.float32, device=self.device)  # last obs of a dream rollout
+        self._action = torch.empty((self.capacity, cfg.dream_trace, cfg.action_dim),
+                                   dtype=torch.float32, device=cfg.device)
+        self._reward = torch.empty((self.capacity, cfg.dream_trace, 1), dtype=torch.float32, device=self.device)
+        self._eps = 1e-6
+        self._full = False
+        self.idx = 0
+        self.batch_size = self.cfg.batch_size // self.cfg.dream_trace
+        self.horizon = self.cfg.env_horizon
+
+    def __add__(self, episode: Episode):
+        self.add(episode)
+        return self
+
+    def add(self, episode: Episode):
+        self._obs[self.idx:self.idx + self.cfg.horizon] = episode.obs[:-1]
+        self._last_obs[self.idx // self.cfg.horizon] = episode.obs[-1]
+        self._action[self.idx:self.idx + self.cfg.horizon] = episode.action
+        self._reward[self.idx:self.idx + self.cfg.horizon] = episode.reward
+        self.idx = (self.idx + self.cfg.horizon) % self.capacity
+        self._full = self._full or self.idx == 0
+
+    def sample(self):
+        idxs = torch.from_numpy(np.random.choice(self.capacity if self._full else self.idx, self.batch_size,
+                                                 replace=not self._full)).to(self.device)
+        obs = self._obs[idxs]
+        next_obs_shape = self._last_obs.shape[1:]
+        next_obs = torch.empty((self.horizon + 1, self.batch_size, *next_obs_shape), dtype=obs.dtype, device=obs.device)
+        action = torch.empty((self.horizon + 1, self.batch_size, *self._action.shape[1:]),
+                             dtype=torch.float32, device=self.device)
+        reward = torch.empty((self.horizon + 1, self.batch_size, *self._reward.shape[1:]), dtype=torch.float32, device=self.device)
+        for t in range(self.horizon + 1):
+            _idxs = idxs + t
+            next_obs[t] = self._obs[_idxs + 1]
+            action[t] = self._action[_idxs]
+            reward[t] = self._reward[_idxs]
+        if not action.is_cuda:
+            action, reward, idxs = action.cuda(), reward.cuda(), idxs.cuda()
+
+        return obs, next_obs, action, reward, idxs
+
+
 def linear_schedule(schdl, step):
     """
-	Outputs values following a linear decay schedule.
-	Adapted from https://github.com/facebookresearch/drqv2
-	"""
+    Outputs values following a linear decay schedule.
+    Adapted from https://github.com/facebookresearch/drqv2
+    """
     try:
         return float(schdl)
     except ValueError:
@@ -352,3 +446,24 @@ def linear_schedule(schdl, step):
             mix = np.clip(step / duration, 0.0, 1.0)
             return (1.0 - mix) * init + mix * final
     raise NotImplementedError(schdl)
+
+
+def init_normalization(channels, type_id="bn", affine=True, one_d=False):
+    assert type_id in ["bn", "ln", "in", "gn", "max", "none", None]
+    if type_id == "bn":
+        if one_d:
+            return torch.nn.BatchNorm1d(channels, affine=affine)
+        else:
+            return torch.nn.BatchNorm2d(channels, affine=affine)
+    elif type_id == "ln":
+        if one_d:
+            return torch.nn.LayerNorm(channels, elementwise_affine=affine)
+        else:
+            return torch.nn.GroupNorm(1, channels, affine=affine)
+    elif type_id == "in":
+        return torch.nn.GroupNorm(channels, channels, affine=affine)
+    elif type_id == "gn":
+        groups = max(min(32, channels//4), 1)
+        return torch.nn.GroupNorm(groups, channels, affine=affine)
+    elif type_id == "none" or type_id is None:
+        return torch.nn.Identity()
