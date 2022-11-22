@@ -42,6 +42,9 @@ class SofTold(nn.Module):
         x = torch.cat([z, a], dim=1)
         return self._soft_q1(x), self._soft_q2(x)
 
+    def pred_z(self, z):
+        return self._predictor(z)
+
 
 class MoSac:
     def __init__(self, cfg):

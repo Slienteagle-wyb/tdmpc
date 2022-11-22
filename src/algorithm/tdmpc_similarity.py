@@ -3,8 +3,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from copy import deepcopy
+from rlpyt.utils.tensor import infer_leading_dims, restore_leading_dims
 import algorithm.helper as h
-
+from gym.wrappers.normalize import RunningMeanStd
 
 class TOLD(nn.Module):
     """Task-Oriented Latent Dynamics (TOLD) model used in TD-MPC."""
@@ -18,7 +19,7 @@ class TOLD(nn.Module):
         self._Q1, self._Q2 = h.q(cfg), h.q(cfg)
         if self.cfg.normalize:
             self._encoder = h.enc_norm(cfg)
-            self._predictor = h.mlp_norm(cfg.latent_dim, cfg.mlp_dim, cfg.latent_dim)
+            self._predictor = h.mlp_norm(cfg.latent_dim, cfg.mlp_dim, cfg.latent_dim, cfg)
         else:
             self._encoder = h.enc(cfg)
             self._predictor = h.mlp(cfg.latent_dim, cfg.mlp_dim, cfg.latent_dim)
@@ -34,7 +35,14 @@ class TOLD(nn.Module):
 
     def h(self, obs):
         """Encodes an observation into its latent representation (h)."""
-        return self._encoder(obs)
+        if self.cfg.modality == 'pixels':
+            lead_dim, T, B, img_shape = infer_leading_dims(obs, 3)
+            obs = obs.view(T*B, *img_shape)
+            latent_feature = self._encoder(obs)
+            latents = restore_leading_dims(latent_feature, lead_dim, T, B)
+        else:
+            latents = self._encoder(obs)
+        return latents
 
     def next(self, z, a):
         """Predicts next latent state (d) and single-step reward (R)."""
@@ -63,7 +71,7 @@ class TDMPCSIM():
 
     def __init__(self, cfg):
         self.cfg = cfg
-        self.device = torch.device(self.cfg.device)
+        self.device = torch.device('cuda')
         self.std = h.linear_schedule(cfg.std_schedule, 0)
         self.model = TOLD(cfg).cuda()
         self.model_target = deepcopy(self.model)
@@ -72,6 +80,7 @@ class TDMPCSIM():
         self.aug = h.RandomShiftsAug(cfg)
         self.model.eval()
         self.model_target.eval()
+        self.reward_rms = RunningMeanStd()
 
     def state_dict(self):
         """Retrieve state dict of TOLD model, including slow-moving target network."""
@@ -198,6 +207,68 @@ class TDMPCSIM():
         keys_norm = F.normalize(keys, dim=-1, p=2)
         return 2.0 - 2.0 * (queries_norm * keys_norm).sum(dim=-1)  # (cfg.horizon*batch_size, )
 
+    @torch.no_grad()
+    def model_rollout(self, z, actions):
+        T, B = actions.shape[:2]
+        zs_latent = []
+        for t in range(T):
+            z, _ = self.model.next(z, actions[t])
+            zs_latent.append(z)
+        zs_latent = torch.stack(zs_latent, dim=0)
+        return zs_latent
+
+    @torch.no_grad()
+    def intrinsic_rewards(self, obs, next_obses, actions):
+        zs_target = self.model_target.h(self.aug(next_obses))
+        z_traj = self.model.h(self.aug(torch.cat([obs.unsqueeze(0), next_obses], dim=0)))
+        model_uncertainty = torch.zeros((self.cfg.horizon+1, self.cfg.horizon+1, self.cfg.batch_size, 1), requires_grad=False).cuda()
+        for t in range(0, z_traj.shape[0]-1):
+            zs_latent = self.model_rollout(z_traj[t], actions[t:t+1])
+            zs_pred = self.model.pred_z(zs_latent)
+            zs_pred = F.normalize(zs_pred, dim=-1, p=2)
+            target = F.normalize(zs_target[t:t+1], dim=-1, p=2)
+            partial_pred_loss = 2.0 - 2.0 * (zs_pred * target).sum(dim=-1, keepdim=True)   # (t:t+1, b, 1)
+            model_uncertainty[t][t:t+1] = partial_pred_loss.detach_()
+
+        intrinsic_reward = torch.sum(model_uncertainty, dim=0).cpu().data.numpy()  # (t, b, 1)
+        reward_mean = np.mean(intrinsic_reward)
+        reward_std = np.std(intrinsic_reward)
+        self.reward_rms.update_from_moments(reward_mean, reward_std ** 2, 1)
+        intrinsic_reward /= np.sqrt(self.reward_rms.var)
+        reward_threshold = self.reward_rms.mean / np.sqrt(self.reward_rms.var)
+        intrinsic_reward = np.maximum(intrinsic_reward - reward_threshold, 0)
+        intrinsic_reward = torch.from_numpy(intrinsic_reward).cuda()
+        return intrinsic_reward.detach_()
+
+    # perform latent rollout to replace the interactive transition from environment
+    @torch.no_grad()
+    def dream(self, next_obses, dream_horizon):
+        # feature cat (batch*traj_horizon, latent_dim)
+        zs = self.model.h(next_obses.reshape((self.cfg.horizon+1) * self.cfg.batch_size, -1))
+        zs_dream = [zs]
+        actions, rewards = [], []
+        for i in range(dream_horizon):
+            action = self.model.pi(zs, self.cfg.min_std)
+            zs, reward_pred = self.model.next(zs, action)
+            zs_dream.append(zs)
+            actions.append(action)
+            rewards.append(reward_pred)
+        zs_dream = torch.stack(zs_dream, dim=0)  # (dream_horizon+1, b*(h+1), latent_dim)
+        actions = torch.stack(actions, dim=0)  # (dream_horizon, b*(h+1), act_dim)
+        rewards = torch.stack(rewards, dim=0)  # (dream_horizon, b*(h+1), 1)
+
+        return zs_dream, actions, rewards
+
+    def dream_loss(self, next_obses, dream_horizon):
+        zs_dream, pi_actions, rewards_pred = self.dream(next_obses, dream_horizon)
+        value_loss = 0
+        for t in range(dream_horizon):
+            rho = self.cfg.rho ** t
+            q1, q2 = self.model.Q(zs_dream[t], pi_actions[t])
+            td_target = self._td_target_latent(zs_dream[t+1], rewards_pred[t])
+            value_loss += rho * (h.mse(q1, td_target) + h.mse(q2, td_target))  # (b*h, 1)
+        return zs_dream, value_loss
+
     def update(self, replay_buffer, step):
         """Main update function. Corresponds to one iteration of the TOLD model learning."""
         # obs [batch, state_dim], actions [horizon+1, batch, act_dim]
@@ -205,6 +276,10 @@ class TDMPCSIM():
         self.optim.zero_grad(set_to_none=True)
         self.std = h.linear_schedule(self.cfg.std_schedule, step)
         self.model.train()
+
+        # calculate intrinsic reward for exploration
+        intrinsic_rewards = self.intrinsic_rewards(obs, next_obses, action)
+        reward += self.cfg.intrinsic_reward_coef * intrinsic_rewards
 
         # Representation
         z = self.model.h(self.aug(obs))
@@ -258,4 +333,5 @@ class TDMPCSIM():
                 'pi_loss': pi_loss,
                 'total_loss': float(total_loss.mean().item()),
                 'weighted_loss': float(weighted_loss.mean().item()),
-                'grad_norm': float(grad_norm)}
+                'grad_norm': float(grad_norm),
+                'intrinsic_batch_reward_mean': intrinsic_rewards.mean().item()}

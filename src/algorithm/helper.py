@@ -121,13 +121,15 @@ def enc_norm(cfg):
     """Returns a TOLD encoder."""
     if cfg.modality == 'pixels':
         C = int(3 * cfg.frame_stack)
+        norm = init_normalization(cfg.mlp_dim, type_id=cfg.norm_type, one_d=True)
         layers = [NormalizeImg(),
                   nn.Conv2d(C, cfg.num_channels, 7, stride=2), nn.BatchNorm2d(cfg.num_channels), nn.ReLU(),
                   nn.Conv2d(cfg.num_channels, cfg.num_channels, 5, stride=2), nn.BatchNorm2d(cfg.num_channels), nn.ReLU(),
                   nn.Conv2d(cfg.num_channels, cfg.num_channels, 3, stride=2), nn.BatchNorm2d(cfg.num_channels), nn.ReLU(),
                   nn.Conv2d(cfg.num_channels, cfg.num_channels, 3, stride=2), nn.BatchNorm2d(cfg.num_channels), nn.ReLU()]
         out_shape = _get_out_shape((C, cfg.img_size, cfg.img_size), layers)
-        layers.extend([Flatten(), nn.Linear(np.prod(out_shape), cfg.latent_dim)])
+        layers.extend([Flatten(), nn.Linear(np.prod(out_shape), cfg.mlp_dim), norm, nn.ELU(),
+                       nn.Linear(cfg.mlp_dim, cfg.latent_dim)])
     else:
         norm = init_normalization(cfg.enc_dim, type_id=cfg.norm_type, one_d=True)
         layers = [nn.Linear(cfg.obs_shape[0], cfg.enc_dim), norm, nn.ELU(),
@@ -145,8 +147,8 @@ def mlp(in_dim, mlp_dim, out_dim, act_fn=nn.ELU()):
         nn.Linear(mlp_dim[1], out_dim))
 
 
-def mlp_norm(in_dim, hidden_dim, out_dim, act_fn=nn.ELU(), norm_type='bn'):
-    norm = init_normalization(hidden_dim, type_id=norm_type, one_d=True)
+def mlp_norm(in_dim, hidden_dim, out_dim, cfg, act_fn=nn.ELU(), norm_type='bn'):
+    norm = init_normalization(cfg.batch_size, type_id=norm_type, one_d=True)
     return nn.Sequential(
         nn.Linear(in_dim, hidden_dim), norm, act_fn,
         nn.Linear(hidden_dim, out_dim)
@@ -216,7 +218,12 @@ class RandomShiftsAug(nn.Module):
     def forward(self, x):
         if not self.pad:
             return x
-        n, c, h, w = x.size()
+        shape_len = len(x.size())
+        if shape_len == 5:
+            t, n, c, h, w = x.size()
+            x = x.reshape(t*n, c, h, w)  # apply the same aug to the same traj.
+
+        n_stacked, c, h, w = x.size()
         assert h == w
         padding = tuple([self.pad] * 4)
         x = F.pad(x, padding, 'replicate')
@@ -224,11 +231,15 @@ class RandomShiftsAug(nn.Module):
         arange = torch.linspace(-1.0 + eps, 1.0 - eps, h + 2 * self.pad, device=x.device, dtype=x.dtype)[:h]
         arange = arange.unsqueeze(0).repeat(h, 1).unsqueeze(2)
         base_grid = torch.cat([arange, arange.transpose(1, 0)], dim=2)
-        base_grid = base_grid.unsqueeze(0).repeat(n, 1, 1, 1)
-        shift = torch.randint(0, 2 * self.pad + 1, size=(n, 1, 1, 2), device=x.device, dtype=x.dtype)
+        base_grid = base_grid.unsqueeze(0).repeat(n_stacked, 1, 1, 1)
+        shift = torch.randint(0, 2 * self.pad + 1, size=(n_stacked, 1, 1, 2), device=x.device, dtype=x.dtype)
         shift *= 2.0 / (h + 2 * self.pad)
         grid = base_grid + shift
-        return F.grid_sample(x, grid, padding_mode='zeros', align_corners=False)
+        shifted = F.grid_sample(x, grid, padding_mode='zeros', align_corners=False)
+        if shape_len == 5:
+            shifted = shifted.reshape(t, n, c, h, w)
+
+        return shifted
 
 
 class Episode(object):
@@ -293,9 +304,11 @@ class ReplayBuffer:
         self.cfg = deepcopy(cfg)
         self.device = torch.device(cfg.device)
         self.capacity = min(cfg.train_steps, cfg.max_buffer_size)
-        dtype = torch.float32
+        dtype = torch.float32 if cfg.modality == 'state' else torch.uint8
         if cfg.modality == 'state':
             obs_shape = cfg.obs_shape
+        else:
+            obs_shape = (3, *cfg.obs_shape[-2:])
         self._obs = torch.empty((self.capacity + 1, *obs_shape), dtype=dtype, device=self.device)
         self._last_obs = torch.empty((self.capacity // self.cfg.episode_length, *cfg.obs_shape), dtype=dtype,
                                      device=self.device)  # last obs of an episodic trajectory
