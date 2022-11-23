@@ -148,7 +148,7 @@ def mlp(in_dim, mlp_dim, out_dim, act_fn=nn.ELU()):
 
 
 def mlp_norm(in_dim, hidden_dim, out_dim, cfg, act_fn=nn.ELU(), norm_type='bn'):
-    norm = init_normalization(cfg.batch_size, type_id=norm_type, one_d=True)
+    norm = init_normalization(hidden_dim, type_id=norm_type, one_d=True)
     return nn.Sequential(
         nn.Linear(in_dim, hidden_dim), norm, act_fn,
         nn.Linear(hidden_dim, out_dim)

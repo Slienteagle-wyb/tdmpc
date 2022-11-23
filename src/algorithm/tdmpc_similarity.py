@@ -4,6 +4,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from copy import deepcopy
 from rlpyt.utils.tensor import infer_leading_dims, restore_leading_dims
+from rlpyt.ul.algos.utils.optim_factory import create_optimizer
+from rlpyt.ul.algos.utils.scheduler_factory import create_scheduler
 import algorithm.helper as h
 from gym.wrappers.normalize import RunningMeanStd
 
@@ -75,12 +77,27 @@ class TDMPCSIM():
         self.std = h.linear_schedule(cfg.std_schedule, 0)
         self.model = TOLD(cfg).cuda()
         self.model_target = deepcopy(self.model)
-        self.optim = torch.optim.Adam(self.model.parameters(), lr=self.cfg.lr)
-        self.pi_optim = torch.optim.Adam(self.model._pi.parameters(), lr=self.cfg.lr)
         self.aug = h.RandomShiftsAug(cfg)
         self.model.eval()
         self.model_target.eval()
         self.reward_rms = RunningMeanStd()
+
+        total_epochs = int(cfg.train_steps / cfg.episode_length)
+        self._optim_initialize(total_epochs)
+
+    def _optim_initialize(self, total_epochs):
+        self.optim = create_optimizer(model=self.model, optim_id=self.cfg.optim_id,
+                                      lr=self.cfg.lr)
+        self.pi_optim = create_optimizer(model=self.model._pi, optim_id=self.cfg.optim_id,
+                                         lr=self.cfg.lr)
+        self.lr_scheduler, _ = create_scheduler(optimizer=self.optim, num_epochs=total_epochs,
+                                                sched_kwargs=self.cfg.sched_kwargs)
+        self.pi_lr_scheduler, _ = create_scheduler(optimizer=self.pi_optim, num_epochs=total_epochs,
+                                                   sched_kwargs=self.cfg.sched_kwargs)
+        self.optim.zero_grad()
+        self.optim.step()
+        self.pi_optim.zero_grad()
+        self.pi_optim.step()
 
     def state_dict(self):
         """Retrieve state dict of TOLD model, including slow-moving target network."""
@@ -224,8 +241,8 @@ class TDMPCSIM():
         model_uncertainty = torch.zeros((self.cfg.horizon+1, self.cfg.horizon+1, self.cfg.batch_size, 1), requires_grad=False).cuda()
         for t in range(0, z_traj.shape[0]-1):
             zs_latent = self.model_rollout(z_traj[t], actions[t:t+1])
-            zs_pred = self.model.pred_z(zs_latent)
-            zs_pred = F.normalize(zs_pred, dim=-1, p=2)
+            zs_pred = self.model.pred_z(zs_latent.squeeze(0))
+            zs_pred = F.normalize(zs_pred.unsqueeze(0), dim=-1, p=2)
             target = F.normalize(zs_target[t:t+1], dim=-1, p=2)
             partial_pred_loss = 2.0 - 2.0 * (zs_pred * target).sum(dim=-1, keepdim=True)   # (t:t+1, b, 1)
             model_uncertainty[t][t:t+1] = partial_pred_loss.detach_()
@@ -273,9 +290,15 @@ class TDMPCSIM():
         """Main update function. Corresponds to one iteration of the TOLD model learning."""
         # obs [batch, state_dim], actions [horizon+1, batch, act_dim]
         obs, next_obses, action, reward, idxs, weights = replay_buffer.sample()
-        self.optim.zero_grad(set_to_none=True)
         self.std = h.linear_schedule(self.cfg.std_schedule, step)
         self.model.train()
+
+        current_epoch = int(step // self.cfg.episode_length)
+        if step % self.cfg.episode_length == 0:
+            self.lr_scheduler.step(current_epoch)
+            self.pi_lr_scheduler.step(current_epoch)
+        current_lr = self.lr_scheduler.get_epoch_values(current_epoch)[0]
+        self.optim.zero_grad(set_to_none=True)
 
         # calculate intrinsic reward for exploration
         intrinsic_rewards = self.intrinsic_rewards(obs, next_obses, action)
@@ -334,4 +357,5 @@ class TDMPCSIM():
                 'total_loss': float(total_loss.mean().item()),
                 'weighted_loss': float(weighted_loss.mean().item()),
                 'grad_norm': float(grad_norm),
-                'intrinsic_batch_reward_mean': intrinsic_rewards.mean().item()}
+                'intrinsic_batch_reward_mean': intrinsic_rewards.mean().item(),
+                'current_lr': current_lr}

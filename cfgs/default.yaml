@@ -20,13 +20,12 @@ batch_size: 512
 max_buffer_size: 1000000
 horizon: 5
 reward_coef: 0.5
-value_coef: 0.1
+value_coef: 0.05
 consistency_coef: 2
 similarity_coef: 1.0
 intrinsic_reward_coef: 0.5
 rho: 0.5
 kappa: 0.1
-lr: 1e-3
 std_schedule: linear(0.5, ${min_std}, 25000)  # end at 25000 train step
 horizon_schedule: linear(1, ${horizon}, 25000)
 per_alpha: 0.6
@@ -36,19 +35,29 @@ seed_steps: 5000
 update_freq: 2
 tau: 0.01
 
+# optim
+lr: 1e-3
+optim_id: 'adamw'
+weight_decay: 0.0
+sched_kwargs:
+  sched_id: 'cosine'
+  min_lr: 1e-6
+  warmup_lr_init: 1e-5
+  warmup_epochs: 20
+
 # architecture
 enc_dim: 256
 mlp_dim: 512
 latent_dim: 50
 
 # wandb (insert your own)
-use_wandb: true
+use_wandb: ture
 wandb_project: MoPAC
 wandb_entity: Slientea98
-wandb_exp_name: 1123_quadruped_walk_similarity_explore0.5_ln1.0_mix0.5
+wandb_exp_name: 1123_quadruped_walk_similarity_explore0.5_bn1.0_mix0.5_batch512_sched_value0.05
 
 # misc
-seed: 19
+seed: 28
 env_horizon: 0  # 0 if normal transition
 dream_horizon : 1
 dream_trace: 8
