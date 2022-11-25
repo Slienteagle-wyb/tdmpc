@@ -89,15 +89,15 @@ class TDMPCSIM():
         self.optim = create_optimizer(model=self.model, optim_id=self.cfg.optim_id,
                                       lr=self.cfg.lr)
         self.pi_optim = create_optimizer(model=self.model._pi, optim_id=self.cfg.optim_id,
-                                         lr=self.cfg.lr)
-        self.lr_scheduler, _ = create_scheduler(optimizer=self.optim, num_epochs=total_epochs,
-                                                sched_kwargs=self.cfg.sched_kwargs)
-        self.pi_lr_scheduler, _ = create_scheduler(optimizer=self.pi_optim, num_epochs=total_epochs,
-                                                   sched_kwargs=self.cfg.sched_kwargs)
-        self.optim.zero_grad()
-        self.optim.step()
-        self.pi_optim.zero_grad()
-        self.pi_optim.step()
+                                         lr=self.cfg.pi_lr)
+        # self.lr_scheduler, _ = create_scheduler(optimizer=self.optim, num_epochs=total_epochs,
+        #                                         sched_kwargs=self.cfg.sched_kwargs)
+        # self.pi_lr_scheduler, _ = create_scheduler(optimizer=self.pi_optim, num_epochs=total_epochs,
+        #                                            sched_kwargs=self.cfg.sched_kwargs)
+        # self.optim.zero_grad()
+        # self.optim.step()
+        # self.pi_optim.zero_grad()
+        # self.pi_optim.step()
 
     def state_dict(self):
         """Retrieve state dict of TOLD model, including slow-moving target network."""
@@ -293,11 +293,11 @@ class TDMPCSIM():
         self.std = h.linear_schedule(self.cfg.std_schedule, step)
         self.model.train()
 
-        current_epoch = int(step // self.cfg.episode_length)
-        if step % self.cfg.episode_length == 0:
-            self.lr_scheduler.step(current_epoch)
-            self.pi_lr_scheduler.step(current_epoch)
-        current_lr = self.lr_scheduler.get_epoch_values(current_epoch)[0]
+        # current_epoch = int(step // self.cfg.episode_length)
+        # if step % self.cfg.episode_length == 0:
+        #     self.lr_scheduler.step(current_epoch)
+        #     self.pi_lr_scheduler.step(current_epoch)
+        # current_lr = self.lr_scheduler.get_epoch_values(current_epoch)[0]
         self.optim.zero_grad(set_to_none=True)
 
         # calculate intrinsic reward for exploration
@@ -357,5 +357,4 @@ class TDMPCSIM():
                 'total_loss': float(total_loss.mean().item()),
                 'weighted_loss': float(weighted_loss.mean().item()),
                 'grad_norm': float(grad_norm),
-                'intrinsic_batch_reward_mean': intrinsic_rewards.mean().item(),
-                'current_lr': current_lr}
+                'intrinsic_batch_reward_mean': intrinsic_rewards.mean().item()}
