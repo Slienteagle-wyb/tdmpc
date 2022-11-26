@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from copy import deepcopy
 from torch import distributions as pyd
 from torch.distributions.utils import _standard_normal
+from rlpyt.ul.models.ul.encoders import DmlabEncoderModelNorm
 
 __REDUCE__ = lambda b: 'mean' if b else 'none'
 LOG_STD_MAX = 2
@@ -135,6 +136,19 @@ def enc_norm(cfg):
         layers = [nn.Linear(cfg.obs_shape[0], cfg.enc_dim), norm, nn.ELU(),
                   nn.Linear(cfg.enc_dim, cfg.latent_dim)]
     return nn.Sequential(*layers)
+
+
+def dmlab_enc_norm(cfg):
+    if cfg.modality == 'pixels':
+        image_shape = (3*cfg.frame_stack, cfg.img_size, cfg.img_size)
+        encoder = DmlabEncoderModelNorm(image_shape=image_shape, latent_size=cfg.latent_dim,
+                                        hidden_sizes=cfg.mlp_dim)
+    else:
+        norm = init_normalization(cfg.enc_dim, type_id=cfg.norm_type, one_d=True)
+        layers = [nn.Linear(cfg.obs_shape[0], cfg.enc_dim), norm, nn.ELU(),
+                  nn.Linear(cfg.enc_dim, cfg.latent_dim)]
+        encoder = nn.Sequential(*layers)
+    return encoder
 
 
 def mlp(in_dim, mlp_dim, out_dim, act_fn=nn.ELU()):
@@ -453,10 +467,10 @@ def linear_schedule(schdl, step):
     try:
         return float(schdl)
     except ValueError:
-        match = re.match(r'linear\((.+),(.+),(.+)\)', schdl)
+        match = re.match(r'linear\((.+),(.+),(.+),(.+)\)', schdl)
         if match:
-            init, final, duration = [float(g) for g in match.groups()]
-            mix = np.clip(step / duration, 0.0, 1.0)
+            init, final, duration, start = [float(g) for g in match.groups()]
+            mix = np.clip((step-start) / duration, 0.0, 1.0)
             return (1.0 - mix) * init + mix * final
     raise NotImplementedError(schdl)
 

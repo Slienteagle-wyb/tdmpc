@@ -9,6 +9,7 @@ from rlpyt.ul.algos.utils.scheduler_factory import create_scheduler
 import algorithm.helper as h
 from gym.wrappers.normalize import RunningMeanStd
 
+
 class TOLD(nn.Module):
     """Task-Oriented Latent Dynamics (TOLD) model used in TD-MPC."""
 
@@ -20,7 +21,7 @@ class TOLD(nn.Module):
         self._pi = h.mlp(cfg.latent_dim, cfg.mlp_dim, cfg.action_dim)
         self._Q1, self._Q2 = h.q(cfg), h.q(cfg)
         if self.cfg.normalize:
-            self._encoder = h.enc_norm(cfg)
+            self._encoder = h.dmlab_enc_norm(cfg)
             self._predictor = h.mlp_norm(cfg.latent_dim, cfg.mlp_dim, cfg.latent_dim, cfg)
         else:
             self._encoder = h.enc(cfg)
@@ -40,7 +41,7 @@ class TOLD(nn.Module):
         if self.cfg.modality == 'pixels':
             lead_dim, T, B, img_shape = infer_leading_dims(obs, 3)
             obs = obs.view(T*B, *img_shape)
-            latent_feature = self._encoder(obs)
+            latent_feature, _ = self._encoder(obs)
             latents = restore_leading_dims(latent_feature, lead_dim, T, B)
         else:
             latents = self._encoder(obs)
@@ -75,6 +76,7 @@ class TDMPCSIM():
         self.cfg = cfg
         self.device = torch.device('cuda')
         self.std = h.linear_schedule(cfg.std_schedule, 0)
+        self.mixture_coef = h.linear_schedule(self.cfg.regularization_schedule, 0)
         self.model = TOLD(cfg).cuda()
         self.model_target = deepcopy(self.model)
         self.aug = h.RandomShiftsAug(cfg)
@@ -141,7 +143,8 @@ class TDMPCSIM():
         # Sample policy trajectories
         obs = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
         horizon = int(min(self.cfg.horizon, h.linear_schedule(self.cfg.horizon_schedule, step)))
-        num_pi_trajs = int(self.cfg.mixture_coef * self.cfg.num_samples)
+        self.mixture_coef = h.linear_schedule(self.cfg.regularization_schedule, step)
+        num_pi_trajs = int(self.mixture_coef * self.cfg.num_samples)
         if num_pi_trajs > 0:
             pi_actions = torch.empty(horizon, num_pi_trajs, self.cfg.action_dim, device=self.device)
             z = self.model.h(obs).repeat(num_pi_trajs, 1)
@@ -301,8 +304,9 @@ class TDMPCSIM():
         self.optim.zero_grad(set_to_none=True)
 
         # calculate intrinsic reward for exploration
+        explore_coef = h.linear_schedule(self.cfg.explore_schedule, step)
         intrinsic_rewards = self.intrinsic_rewards(obs, next_obses, action)
-        reward += self.cfg.intrinsic_reward_coef * intrinsic_rewards
+        reward += explore_coef * intrinsic_rewards
 
         # Representation
         z = self.model.h(self.aug(obs))
@@ -357,4 +361,6 @@ class TDMPCSIM():
                 'total_loss': float(total_loss.mean().item()),
                 'weighted_loss': float(weighted_loss.mean().item()),
                 'grad_norm': float(grad_norm),
-                'intrinsic_batch_reward_mean': intrinsic_rewards.mean().item()}
+                'intrinsic_batch_reward_mean': intrinsic_rewards.mean().item(),
+                'current_explore_coef': explore_coef,
+                'mixture_coef': self.mixture_coef}

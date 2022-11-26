@@ -1,1 +1,5 @@
 action_repeat: 8
+explore_schedule: linear(0, ${intrinsic_reward_coef}, 10000, 2500)
+regularization_schedule: linear(0.05, ${mixture_coef}, 10000, 2500)
+lr: 3e-4
+pi_lr: 3e-4
