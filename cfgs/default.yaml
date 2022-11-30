@@ -28,8 +28,8 @@ rho: 0.5
 kappa: 0.1
 std_schedule: linear(0.5, ${min_std}, 25000, 0)  # duration 25000 train step
 horizon_schedule: linear(1, ${horizon}, 25000, 0)
-explore_schedule: linear(0, ${intrinsic_reward_coef}, 20000, 5000)
-regularization_schedule: linear(0.05, ${mixture_coef}, 20000, 5000)
+explore_schedule: linear(0, ${intrinsic_reward_coef}, 25000, 5000)
+regularization_schedule: linear(0.05, ${mixture_coef}, 1, 5000)
 per_alpha: 0.6
 per_beta: 0.4
 grad_clip_norm: 10
@@ -57,10 +57,10 @@ latent_dim: 128
 use_wandb: ture
 wandb_project: MoPAC
 wandb_entity: Slientea98
-wandb_exp_name: 1126_cheetah_similarity_explore_mix_sched
+wandb_exp_name: 1130_cheetah_run_similarity_explore0.5_sched200k_mix0.5_delay
 
 # misc
-seed: 0
+seed: 8
 env_horizon: 0  # 0 if normal transition
 dream_horizon : 1
 dream_trace: 8
