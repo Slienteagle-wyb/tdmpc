@@ -7,17 +7,18 @@ from rlpyt.utils.tensor import infer_leading_dims, restore_leading_dims
 from rlpyt.ul.algos.utils.optim_factory import create_optimizer
 from rlpyt.ul.algos.utils.scheduler_factory import create_scheduler
 import algorithm.helper as h
+from models.gru_dyna import DGruDyna
 from gym.wrappers.normalize import RunningMeanStd
 
 
-class TOLD(nn.Module):
+class DSSM(nn.Module):
     """Task-Oriented Latent Dynamics (TOLD) model used in TD-MPC."""
 
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
-        self._dynamics = h.mlp(cfg.latent_dim + cfg.action_dim, cfg.mlp_dim, cfg.latent_dim)
-        self._reward = h.mlp(cfg.latent_dim + cfg.action_dim, cfg.mlp_dim, 1)
+        self._dynamics = DGruDyna(cfg)
+        self._reward = h.mlp(cfg.hidden_dim, cfg.mlp_dim, 1)
         self._pi = h.mlp(cfg.latent_dim, cfg.mlp_dim, cfg.action_dim)
         self._Q1, self._Q2 = h.q(cfg), h.q(cfg)
         if self.cfg.normalize:
@@ -47,10 +48,13 @@ class TOLD(nn.Module):
             latents = self._encoder(obs)
         return latents
 
-    def next(self, z, a):
-        """Predicts next latent state (d) and single-step reward (R)."""
-        x = torch.cat([z, a], dim=-1)
-        return self._dynamics(x), self._reward(x)
+    def next(self, z, a, h_prev):
+        z, hidden = self._dynamics(z, a, h_prev)
+        reward_pred = self._reward(hidden)
+        return z, hidden, reward_pred
+
+    def init_hidden_state(self, batch_size, device):
+        return self._dynamics.init_hidden_state(batch_size, device)
 
     def pi(self, z, std=0):
         """Samples an action from the learned policy (pi)."""
@@ -69,7 +73,7 @@ class TOLD(nn.Module):
         return self._predictor(z)
 
 
-class TDMPCSIM():
+class TdMpcSimDssm:
     """Implementation of TD-MPC learning + inference."""
 
     def __init__(self, cfg):
@@ -77,7 +81,7 @@ class TDMPCSIM():
         self.device = torch.device('cuda')
         self.std = h.linear_schedule(cfg.std_schedule, 0)
         self.mixture_coef = h.linear_schedule(self.cfg.regularization_schedule, 0)
-        self.model = TOLD(cfg).cuda()
+        self.model = DSSM(cfg).cuda()
         self.model_target = deepcopy(self.model)
         self.aug = h.RandomShiftsAug(cfg)
         self.model.eval()
@@ -117,18 +121,18 @@ class TDMPCSIM():
         self.model_target.load_state_dict(d['model_target'])
 
     @torch.no_grad()
-    def estimate_value(self, z, actions, horizon):
+    def estimate_value(self, z, actions, hidden, horizon):
         """Estimate value of a trajectory starting at latent state z and executing given actions."""
         G, discount = 0, 1
         for t in range(horizon):
-            z, reward = self.model.next(z, actions[t])
+            z, hidden, reward = self.model.next(z, actions[t], hidden)
             G += discount * reward
             discount *= self.cfg.discount
         G += discount * torch.min(*self.model.Q(z, self.model.pi(z, self.cfg.min_std)))
         return G
 
     @torch.no_grad()
-    def plan(self, obs, eval_mode=False, step=None, t0=True):
+    def plan(self, obs, hidden, eval_mode=False, step=None, t0=True):
         """
 		Plan next action using TD-MPC inference.
 		obs: raw input observation.
@@ -138,7 +142,7 @@ class TDMPCSIM():
 		"""
         # Seed steps
         if step < self.cfg.seed_steps and not eval_mode:
-            return torch.empty(self.cfg.action_dim, dtype=torch.float32, device=self.device).uniform_(-1, 1)
+            return torch.empty(self.cfg.action_dim, dtype=torch.float32, device=self.device).uniform_(-1, 1), None
 
         # Sample policy trajectories
         obs = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
@@ -148,12 +152,14 @@ class TDMPCSIM():
         if num_pi_trajs > 0:
             pi_actions = torch.empty(horizon, num_pi_trajs, self.cfg.action_dim, device=self.device)
             z = self.model.h(obs).repeat(num_pi_trajs, 1)
+            hidden_pi = hidden.repeat(num_pi_trajs, 1)
             for t in range(horizon):
                 pi_actions[t] = self.model.pi(z, self.cfg.min_std)
-                z, _ = self.model.next(z, pi_actions[t])
+                z, hidden_pi, _ = self.model.next(z, pi_actions[t], hidden_pi)
 
         # Initialize state and parameters
         z = self.model.h(obs).repeat(self.cfg.num_samples + num_pi_trajs, 1)
+        hidden_plan = hidden.repeat(self.cfg.num_samples + num_pi_trajs, 1)
         mean = torch.zeros(horizon, self.cfg.action_dim, device=self.device)
         std = 2 * torch.ones(horizon, self.cfg.action_dim, device=self.device)
         if not t0 and hasattr(self, '_prev_mean'):
@@ -169,7 +175,7 @@ class TDMPCSIM():
                 actions = torch.cat([actions, pi_actions], dim=1)
 
             # Compute elite actions
-            value = self.estimate_value(z, actions, horizon).nan_to_num_(0)  # forward shoot plus q_value
+            value = self.estimate_value(z, actions, hidden_plan, horizon).nan_to_num_(0)
             elite_idxs = torch.topk(value.squeeze(1), self.cfg.num_elites, dim=0).indices
             elite_value, elite_actions = value[elite_idxs], actions[:, elite_idxs]  # select action of high value
 
@@ -191,7 +197,10 @@ class TDMPCSIM():
         a = mean
         if not eval_mode:
             a += std * torch.randn(self.cfg.action_dim, device=std.device)
-        return a
+        # step the model to calculate the next hidden state
+        z, hidden, _ = self.model.next(z[0:1], a.unsqueeze(0), hidden)
+
+        return a, hidden
 
     def update_pi(self, zs):
         """Update policy using a sequence of latent states."""
@@ -231,8 +240,9 @@ class TDMPCSIM():
     def model_rollout(self, z, actions):
         T, B = actions.shape[:2]
         zs_latent = []
+        hidden = self.model.init_hidden_state(z.shape[0], z.device)
         for t in range(T):
-            z, _ = self.model.next(z, actions[t])
+            z, hidden, _ = self.model.next(z, actions[t], hidden)
             zs_latent.append(z)
         zs_latent = torch.stack(zs_latent, dim=0)
         return zs_latent
@@ -242,6 +252,7 @@ class TDMPCSIM():
         zs_target = self.model_target.h(self.aug(next_obses))
         z_traj = self.model.h(self.aug(torch.cat([obs.unsqueeze(0), next_obses], dim=0)))
         model_uncertainty = torch.zeros((self.cfg.horizon+1, self.cfg.horizon+1, self.cfg.batch_size, 1), requires_grad=False).cuda()
+
         for t in range(0, z_traj.shape[0]-1):
             zs_latent = self.model_rollout(z_traj[t], actions[t:t+1])
             zs_pred = self.model.pred_z(zs_latent.squeeze(0))
@@ -260,34 +271,6 @@ class TDMPCSIM():
         intrinsic_reward = torch.from_numpy(intrinsic_reward).cuda()
         return intrinsic_reward.detach_()
 
-    # perform latent rollout to replace the interactive transition from environment
-    @torch.no_grad()
-    def dream(self, next_obses, dream_horizon):
-        # feature cat (batch*traj_horizon, latent_dim)
-        zs = self.model.h(next_obses.reshape((self.cfg.horizon+1) * self.cfg.batch_size, -1))
-        zs_dream = [zs]
-        actions, rewards = [], []
-        for i in range(dream_horizon):
-            action = self.model.pi(zs, self.cfg.min_std)
-            zs, reward_pred = self.model.next(zs, action)
-            zs_dream.append(zs)
-            actions.append(action)
-            rewards.append(reward_pred)
-        zs_dream = torch.stack(zs_dream, dim=0)  # (dream_horizon+1, b*(h+1), latent_dim)
-        actions = torch.stack(actions, dim=0)  # (dream_horizon, b*(h+1), act_dim)
-        rewards = torch.stack(rewards, dim=0)  # (dream_horizon, b*(h+1), 1)
-
-        return zs_dream, actions, rewards
-
-    def dream_loss(self, next_obses, dream_horizon):
-        zs_dream, pi_actions, rewards_pred = self.dream(next_obses, dream_horizon)
-        value_loss = 0
-        for t in range(dream_horizon):
-            rho = self.cfg.rho ** t
-            q1, q2 = self.model.Q(zs_dream[t], pi_actions[t])
-            td_target = self._td_target_latent(zs_dream[t+1], rewards_pred[t])
-            value_loss += rho * (h.mse(q1, td_target) + h.mse(q2, td_target))  # (b*h, 1)
-        return zs_dream, value_loss
 
     def update(self, replay_buffer, step):
         """Main update function. Corresponds to one iteration of the TOLD model learning."""
@@ -314,10 +297,11 @@ class TDMPCSIM():
         zs_query, zs_key = [], []
 
         consistency_loss, reward_loss, value_loss, priority_loss = 0, 0, 0, 0
+        hidden = self.model.init_hidden_state(z.shape[0], z.device)
         for t in range(self.cfg.horizon):
             # Predictions
             Q1, Q2 = self.model.Q(z, action[t])
-            z, reward_pred = self.model.next(z, action[t])
+            z, hidden, reward_pred = self.model.next(z, action[t], hidden)
             with torch.no_grad():
                 next_obs = self.aug(next_obses[t])
                 next_z = self.model_target.h(next_obs)

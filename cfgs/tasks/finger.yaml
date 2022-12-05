@@ -1,2 +1,1 @@
 action_repeat: 2
-explore_schedule: linear(0, ${intrinsic_reward_coef}, 10000, 2500)

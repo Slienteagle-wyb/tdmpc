@@ -1,5 +1,5 @@
 import os
-os.environ['MUJOCO_GL'] = 'egl'
+os.environ['MUJOCO_GL'] = 'glfw'  # 'egl' for headless mode
 import time
 from dm_control import suite
 env = suite.load('cartpole', 'swingup')

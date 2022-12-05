@@ -51,16 +51,18 @@ weight_decay: 0.0
 # architecture
 enc_dim: 256
 mlp_dim: 512
-latent_dim: 128
+latent_dim: 50  # 50
+hidden_dim: 128  # 128
+norm_cell: true
 
 # wandb (insert your own)
-use_wandb: ture
+use_wandb: true
 wandb_project: MoPAC
 wandb_entity: Slientea98
-wandb_exp_name: 1130_cheetah_run_similarity_explore0.5_sched200k_mix0.5_delay
+wandb_exp_name: 1205_quadruped_walk_similarity_explore0.5_schded25k_mix0.5_adjust_gru_latent50_hidden128
 
 # misc
-seed: 8
+seed: 68
 env_horizon: 0  # 0 if normal transition
 dream_horizon : 1
 dream_trace: 8
@@ -71,7 +73,7 @@ save_video: false
 save_model: false
 device: 'cuda'
 normalize: true
-norm_type: 'ln'  # 'bn' for quadruped
+norm_type: 'ln'
 
 # sac
 q_lr: 1e-3

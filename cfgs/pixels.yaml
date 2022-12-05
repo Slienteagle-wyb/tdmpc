@@ -5,6 +5,6 @@ img_size: 84
 lr: 3e-4
 pi_lr: 3e-4
 batch_size: 512
-latent_dim: 256
-explore_schedule: linear(0, ${intrinsic_reward_coef}, 50000, 10000)
-regularization_schedule: linear(0.05, ${mixture_coef}, 1, 10000)
+latent_dim: 128
+explore_schedule: linear(0, ${intrinsic_reward_coef}, 50000, 25000)
+regularization_schedule: linear(0.05, ${mixture_coef}, 1, 25000)

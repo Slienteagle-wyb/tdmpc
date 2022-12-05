@@ -285,3 +285,15 @@ def make_env(cfg):
 	cfg.action_dim = env.action_space.shape[0]
 
 	return env
+
+
+def make_mujoco_env(cfg):
+	env_id = cfg.task
+	assert env_id in gym.envs.registry.keys()
+	env = gym.make(env_id)
+
+	cfg.obs_shape = tuple(int(x) for x in env.observation_space.shape)
+	cfg.action_shape = tuple(int(x) for x in env.action_space.shape)
+	cfg.action_dim = env.action_space.shape[0]
+
+	return env
