@@ -1,5 +1,6 @@
 train_steps: 3000000/${action_repeat}
 action_repeat: 2
+action_latent: 32
 iterations: 12
 latent_dim: 128
 explore_schedule: linear(0, ${intrinsic_reward_coef}, 1350000, 150000)

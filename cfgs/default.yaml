@@ -19,11 +19,12 @@ momentum: 0.1
 batch_size: 512
 max_buffer_size: 1000000
 horizon: 5
+similarity_horizon: 1
 reward_coef: 0.5
 value_coef: 0.1
 consistency_coef: 2
 similarity_coef: 1.0
-intrinsic_reward_coef: 0.5
+intrinsic_reward_coef: 0.002  # 0.002 for quad, 0.5 for dm_control
 rho: 0.5
 kappa: 0.1
 std_schedule: linear(0.5, ${min_std}, 25000, 0)  # duration 25000 train step
@@ -59,10 +60,10 @@ norm_cell: true
 use_wandb: true
 wandb_project: MoPAC
 wandb_entity: Slientea98
-wandb_exp_name: 1205_quadruped_walk_similarity_explore0.5_schded25k_mix0.5_adjust_gru_latent50_hidden128
+wandb_exp_name: 1231_quadrotor_setpoint_similarity_vel_clipped_pos_norm_log_dist_crash0.0_pos_bound_omega_thrust_resample
 
 # misc
-seed: 68
+seed: 60
 env_horizon: 0  # 0 if normal transition
 dream_horizon : 1
 dream_trace: 8
@@ -70,10 +71,12 @@ exp_name: default
 eval_freq: 20000
 eval_episodes: 10
 save_video: false
-save_model: false
+save_model: true
 device: 'cuda'
 normalize: true
 norm_type: 'ln'
+model_path: 'models/model.pt'  #checkpoint_1000
+save_interval: 1000 # count in epoch
 
 # sac
 q_lr: 1e-3

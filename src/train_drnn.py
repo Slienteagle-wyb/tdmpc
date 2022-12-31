@@ -95,7 +95,7 @@ def train(cfg):
         while not episode.done:
             # reset the hidden state for gru every cfg.horizon step.
             if episode.first or total_train_step % 1 == 0:
-                hidden = agent.model.init_hidden_state(batch_size=1, device=cfg.device)
+                hidden = agent.model.init_hidden_state(batch_size=1, device='cuda')
             action, hidden = agent.plan(obs, hidden, step=step, t0=episode.first)
             obs, reward, done, _ = env.step(action.cpu().numpy())
             episode += (obs, action, reward, done)

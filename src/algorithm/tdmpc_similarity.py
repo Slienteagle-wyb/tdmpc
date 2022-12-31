@@ -83,6 +83,7 @@ class TDMPCSIM():
         self.model.eval()
         self.model_target.eval()
         self.reward_rms = RunningMeanStd()
+        self.plan_horizon = 1
 
         total_epochs = int(cfg.train_steps / cfg.episode_length)
         self._optim_initialize(total_epochs)
@@ -143,33 +144,34 @@ class TDMPCSIM():
         # Sample policy trajectories
         obs = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
         horizon = int(min(self.cfg.horizon, h.linear_schedule(self.cfg.horizon_schedule, step)))
+        if horizon != self.plan_horizon and t0:
+            self.plan_horizon = horizon
         self.mixture_coef = h.linear_schedule(self.cfg.regularization_schedule, step)
         num_pi_trajs = int(self.mixture_coef * self.cfg.num_samples)
         if num_pi_trajs > 0:
-            pi_actions = torch.empty(horizon, num_pi_trajs, self.cfg.action_dim, device=self.device)
+            pi_actions = torch.empty(self.plan_horizon, num_pi_trajs, self.cfg.action_dim, device=self.device)
             z = self.model.h(obs).repeat(num_pi_trajs, 1)
-            for t in range(horizon):
+            for t in range(self.plan_horizon):
                 pi_actions[t] = self.model.pi(z, self.cfg.min_std)
                 z, _ = self.model.next(z, pi_actions[t])
 
         # Initialize state and parameters
         z = self.model.h(obs).repeat(self.cfg.num_samples + num_pi_trajs, 1)
-        mean = torch.zeros(horizon, self.cfg.action_dim, device=self.device)
-        std = 2 * torch.ones(horizon, self.cfg.action_dim, device=self.device)
+        mean = torch.zeros(self.plan_horizon, self.cfg.action_dim, device=self.device)
+        std = 2 * torch.ones(self.plan_horizon, self.cfg.action_dim, device=self.device)
         if not t0 and hasattr(self, '_prev_mean'):
             mean[:-1] = self._prev_mean[1:]
-
         # Iterate CEM
         for i in range(self.cfg.iterations):
             # parameterized action of mpc
             actions = torch.clamp(mean.unsqueeze(1) + std.unsqueeze(1) * \
-                                  torch.randn(horizon, self.cfg.num_samples, self.cfg.action_dim, device=std.device),
+                                  torch.randn(self.plan_horizon, self.cfg.num_samples, self.cfg.action_dim, device=std.device),
                                   -1, 1)
             if num_pi_trajs > 0:
                 actions = torch.cat([actions, pi_actions], dim=1)
 
             # Compute elite actions
-            value = self.estimate_value(z, actions, horizon).nan_to_num_(0)  # forward shoot plus q_value
+            value = self.estimate_value(z, actions, self.plan_horizon).nan_to_num_(0)  # forward shoot plus q_value
             elite_idxs = torch.topk(value.squeeze(1), self.cfg.num_elites, dim=0).indices
             elite_value, elite_actions = value[elite_idxs], actions[:, elite_idxs]  # select action of high value
 
@@ -304,9 +306,9 @@ class TDMPCSIM():
         self.optim.zero_grad(set_to_none=True)
 
         # calculate intrinsic reward for exploration
-        explore_coef = h.linear_schedule(self.cfg.explore_schedule, step)
-        intrinsic_rewards = self.intrinsic_rewards(obs, next_obses, action)
-        reward_pi = explore_coef * intrinsic_rewards + reward
+        # explore_coef = h.linear_schedule(self.cfg.explore_schedule, step)
+        # intrinsic_rewards = self.intrinsic_rewards(obs, next_obses, action)
+        # reward_pi = explore_coef * intrinsic_rewards + reward
 
         # Representation
         z = self.model.h(self.aug(obs))
@@ -321,7 +323,7 @@ class TDMPCSIM():
             with torch.no_grad():
                 next_obs = self.aug(next_obses[t])
                 next_z = self.model_target.h(next_obs)
-                td_target = self._td_target(next_obs, reward_pi[t])
+                td_target = self._td_target(next_obs, reward[t])
             zs_query.append(z)
             zs_key.append(next_z.detach())
             zs.append(z.detach())
@@ -340,6 +342,9 @@ class TDMPCSIM():
         total_loss = self.cfg.similarity_coef * similarity_loss.clamp(max=1e4) + \
                      self.cfg.reward_coef * reward_loss.clamp(max=1e4) + \
                      self.cfg.value_coef * value_loss.clamp(max=1e4)
+        # total_loss = self.cfg.consistency_coef * consistency_loss.clamp(max=1e4) + \
+        #              self.cfg.reward_coef * reward_loss.clamp(max=1e4) + \
+        #              self.cfg.value_coef * value_loss.clamp(max=1e4)
         weighted_loss = (total_loss * weights).mean()
         weighted_loss.register_hook(lambda grad: grad * (1 / self.cfg.horizon))
         weighted_loss.backward()
@@ -361,6 +366,6 @@ class TDMPCSIM():
                 'total_loss': float(total_loss.mean().item()),
                 'weighted_loss': float(weighted_loss.mean().item()),
                 'grad_norm': float(grad_norm),
-                'intrinsic_batch_reward_mean': intrinsic_rewards.mean().item(),
-                'current_explore_coef': explore_coef,
+                # 'intrinsic_batch_reward_mean': intrinsic_rewards.mean().item(),
+                # 'current_explore_coef': explore_coef,
                 'mixture_coef': self.mixture_coef}

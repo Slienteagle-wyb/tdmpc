@@ -10,7 +10,8 @@ from termcolor import colored
 from omegaconf import OmegaConf
 
 CONSOLE_FORMAT = [('episode', 'E', 'int'), ('env_step', 'S', 'int'), ('episode_reward', 'R', 'float'),
-				  ('episode_reward_pi', 'PR', 'float'), ('total_time', 'T', 'time')]
+				  ('episode_reward_pi', 'PR', 'float'), ('episode_reward_mean', 'MR', 'float'),
+				  ('episode_length', 'EL', 'int'), ('total_time', 'T', 'time')]
 AGENT_METRICS = ['consistency_loss', 'reward_loss', 'value_loss', 'total_loss', 'weighted_loss', 'pi_loss', 'grad_norm']
 
 
@@ -139,7 +140,7 @@ class Logger(object):
 		if ty == 'int':
 			return f'{colored(key + ":", "grey")} {int(value):,}'
 		elif ty == 'float':
-			return f'{colored(key + ":", "grey")} {value:.01f}'
+			return f'{colored(key + ":", "grey")} {value:.04f}'
 		elif ty == 'time':
 			value = str(datetime.timedelta(seconds=int(value)))
 			return f'{colored(key + ":", "grey")} {value}'
@@ -163,3 +164,8 @@ class Logger(object):
 			self._eval.append(np.array([d[keys[0]], d[keys[1]]]))
 			pd.DataFrame(np.array(self._eval)).to_csv(self._log_dir / 'eval.log', header=keys, index=None)
 		self._print(d, category)
+
+	def save_model(self, agent, episode_idx):
+		name = 'checkpoint_' + str(episode_idx) + '.pt'
+		fp = os.path.join(self._model_dir, name)
+		torch.save(agent.state_dict(), fp)

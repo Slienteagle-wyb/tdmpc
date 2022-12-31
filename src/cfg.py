@@ -32,7 +32,7 @@ def parse_cfg(cfg_path: str) -> OmegaConf:
 	base.merge_with(domain_cfg, cli)
 
 	# Algebraic expressions
-	for k,v in base.items():
+	for k, v in base.items():
 		if isinstance(v, str):
 			match = re.match(r'(\d+)([+\-*/])(\d+)', v)
 			if match:

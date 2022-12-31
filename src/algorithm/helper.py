@@ -268,6 +268,7 @@ class Episode(object):
         self.action = torch.empty((cfg.episode_length, cfg.action_dim), dtype=torch.float32, device=self.device)
         self.reward = torch.empty((cfg.episode_length,), dtype=torch.float32, device=self.device)
         self.cumulative_reward = 0
+        self.episode_reward_mean = 0
         self.done = False
         self._idx = 0
 
@@ -286,9 +287,10 @@ class Episode(object):
         self.obs[self._idx + 1] = torch.tensor(obs, dtype=self.obs.dtype, device=self.obs.device)
         self.action[self._idx] = action
         self.reward[self._idx] = reward
-        self.cumulative_reward += reward
-        self.done = done
         self._idx += 1
+        self.cumulative_reward += reward
+        self.episode_reward_mean = self.cumulative_reward / self._idx
+        self.done = done
 
 
 class ModelRollout(Episode):
@@ -356,6 +358,7 @@ class ReplayBuffer:
             max_priority = 1. if self.idx == 0 else self._priorities[:self.idx].max().to(self.device).item()
         mask = torch.arange(self.cfg.episode_length) >= self.cfg.episode_length - self.cfg.horizon
         new_priorities = torch.full((self.cfg.episode_length,), max_priority, device=self.device)
+        # mask the priority of last 5 transitions to be 0
         new_priorities[mask] = 0
         self._priorities[self.idx:self.idx + self.cfg.episode_length] = new_priorities
         self.idx = (self.idx + self.cfg.episode_length) % self.capacity
@@ -413,50 +416,102 @@ class RolloutBuffer:
     def __init__(self, cfg):
         self.cfg = deepcopy(cfg)
         self.device = torch.device(cfg.device)
-        self.capacity = int(min(cfg.train_steps, cfg.max_buffer_size) / self.cfg.dream_trace)
-        self._obs = torch.empty((self.capacity + 1, cfg.dream_trace, cfg.latent_dim), dtype=torch.float32,
-                                device=self.device)
-        self._last_obs = torch.empty((self.capacity // self.cfg.horizon, cfg.dream_trace, cfg.latent_dim),
-                                     dtype=torch.float32, device=self.device)  # last obs of a dream rollout
-        self._action = torch.empty((self.capacity, cfg.dream_trace, cfg.action_dim),
-                                   dtype=torch.float32, device=cfg.device)
-        self._reward = torch.empty((self.capacity, cfg.dream_trace, 1), dtype=torch.float32, device=self.device)
+        self.capacity = min(cfg.train_steps, cfg.max_buffer_size)
+        dtype = torch.float32 if cfg.modality == 'state' else torch.uint8
+        if cfg.modality == 'state':
+            obs_shape = cfg.obs_shape
+        else:
+            obs_shape = (3, *cfg.obs_shape[-2:])
+        self._obs = torch.empty((self.capacity + 1, *obs_shape), dtype=dtype, device=self.device)
+        # self._last_obs = torch.empty((self.capacity // self.cfg.episode_length, *cfg.obs_shape), dtype=dtype,
+        #                              device=self.device)  # last obs of an episodic trajectory
+        self._last_obs = []  # modify to adjust the changeable traj length
+        self._action = torch.empty((self.capacity, cfg.action_dim), dtype=torch.float32, device=self.device)
+        self._reward = torch.empty((self.capacity,), dtype=torch.float32, device=self.device)
+        self._priorities = torch.ones((self.capacity,), dtype=torch.float32, device=self.device)
         self._eps = 1e-6
         self._full = False
         self.idx = 0
-        self.batch_size = self.cfg.batch_size // self.cfg.dream_trace
-        self.horizon = self.cfg.env_horizon
+        self.batch_size = self.cfg.batch_size
+        self.horizon = self.cfg.horizon
 
     def __add__(self, episode: Episode):
-        self.add(episode)
+        if len(episode) > self.capacity - self.idx:
+            # mask the left empty clip in the buffer
+            self._priorities[self.idx:] = 0
+            print('the replay buffer is full, and the sum of transition is :', self.idx)
+            self._full = True
+            self.idx = 0
+        else:
+            self.add(episode)
         return self
 
     def add(self, episode: Episode):
-        self._obs[self.idx:self.idx + self.cfg.horizon] = episode.obs[:-1]
-        self._last_obs[self.idx // self.cfg.horizon] = episode.obs[-1]
-        self._action[self.idx:self.idx + self.cfg.horizon] = episode.action
-        self._reward[self.idx:self.idx + self.cfg.horizon] = episode.reward
-        self.idx = (self.idx + self.cfg.horizon) % self.capacity
+        episode_length = len(episode)
+        self._obs[self.idx:self.idx + episode_length] = episode.obs[:episode_length] if \
+        self.cfg.modality == 'state' else episode.obs[:episode_length, -3:]
+        self._last_obs.append(episode.obs[-1])
+        # self._last_obs[self.idx // self.cfg.episode_length] = episode.obs[-1]
+        self._action[self.idx:self.idx + episode_length] = episode.action[:episode_length]
+        self._reward[self.idx:self.idx + episode_length] = episode.reward[:episode_length]
+        if self._full:
+            max_priority = self._priorities.max().to(self.device).item()
+        else:
+            max_priority = 1. if self.idx == 0 else self._priorities[:self.idx].max().to(self.device).item()
+        mask = torch.arange(episode_length) >= episode_length - self.cfg.horizon
+        new_priorities = torch.full((episode_length,), max_priority, device=self.device)
+        # mask the priority of last 5 transitions to be 0
+        new_priorities[mask] = 0
+        self._priorities[self.idx:self.idx + episode_length] = new_priorities
+        self.idx = (self.idx + episode_length) % self.capacity
         self._full = self._full or self.idx == 0
 
+    def update_priorities(self, idxs, priorities):
+        self._priorities[idxs] = priorities.squeeze(1).to(self.device) + self._eps
+
+    def _get_obs(self, arr, idxs):
+        if self.cfg.modality == 'state':
+            return arr[idxs]
+        obs = torch.empty((self.batch_size, 3 * self.cfg.frame_stack, *arr.shape[-2:]), dtype=arr.dtype,
+                          device=torch.device('cuda'))
+        obs[:, -3:] = arr[idxs].cuda()
+        _idxs = idxs.clone()
+        mask = torch.ones_like(_idxs, dtype=torch.bool)
+        for i in range(1, self.cfg.frame_stack):
+            mask[_idxs % self.cfg.episode_length == 0] = False
+            _idxs[mask] -= 1
+            obs[:, -(i + 1) * 3:-i * 3] = arr[_idxs].cuda()
+        return obs.float()
+
     def sample(self):
-        idxs = torch.from_numpy(np.random.choice(self.capacity if self._full else self.idx, self.batch_size,
-                                                 replace=not self._full)).to(self.device)
-        obs = self._obs[idxs]
-        next_obs_shape = self._last_obs.shape[1:]
+        probs = (self._priorities if self._full else self._priorities[:self.idx]) ** self.cfg.per_alpha
+        probs /= probs.sum()
+        total = len(probs)
+        idxs = torch.from_numpy(
+            np.random.choice(total, self.batch_size, p=probs.cpu().numpy(), replace=not self._full)).to(self.device)
+        weights = (total * probs[idxs]) ** (-self.cfg.per_beta)
+        weights /= weights.max()
+
+        obs = self._get_obs(self._obs, idxs)
+        next_obs_shape = self._last_obs[0].shape if self.cfg.modality == 'state' else (
+            3 * self.cfg.frame_stack, *self._last_obs.shape[-2:])
         next_obs = torch.empty((self.horizon + 1, self.batch_size, *next_obs_shape), dtype=obs.dtype, device=obs.device)
-        action = torch.empty((self.horizon + 1, self.batch_size, *self._action.shape[1:]),
-                             dtype=torch.float32, device=self.device)
-        reward = torch.empty((self.horizon + 1, self.batch_size, *self._reward.shape[1:]), dtype=torch.float32, device=self.device)
+        action = torch.empty((self.horizon + 1, self.batch_size, *self._action.shape[1:]), dtype=torch.float32,
+                             device=self.device)
+        reward = torch.empty((self.horizon + 1, self.batch_size), dtype=torch.float32, device=self.device)
         for t in range(self.horizon + 1):
             _idxs = idxs + t
-            next_obs[t] = self._obs[_idxs + 1]
+            next_obs[t] = self._get_obs(self._obs, _idxs + 1)
             action[t] = self._action[_idxs]
             reward[t] = self._reward[_idxs]
-        if not action.is_cuda:
-            action, reward, idxs = action.cuda(), reward.cuda(), idxs.cuda()
 
-        return obs, next_obs, action, reward, idxs
+        # mask = (_idxs + 1) % self.cfg.episode_length == 0
+        # next_obs[-1, mask] = self._last_obs[_idxs[mask] // self.cfg.episode_length].cuda().float()
+        if not action.is_cuda:
+            action, reward, idxs, weights = \
+                action.cuda(), reward.cuda(), idxs.cuda(), weights.cuda()
+
+        return obs, next_obs, action, reward.unsqueeze(2), idxs, weights
 
 
 def linear_schedule(schdl, step):

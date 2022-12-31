@@ -1,0 +1,5 @@
+action_repeat: 1
+episode_length: 1200/${action_repeat}
+train_steps: 600000/${action_repeat}
+env:
+  render: false
