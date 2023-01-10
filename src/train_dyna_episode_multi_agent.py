@@ -163,7 +163,16 @@ def test_gym_art_multi_agent(cfg):
         while not done:
             if cfg.env.render and (step_count % 2 == 0):
                 env.render()
-            action = agent.plan(s, eval_mode=True, step=0, t0=step_count == 0)
+
+            if step_count < 0:
+                # actor of the off-policy ac
+                obs = torch.tensor(s, dtype=torch.float32, device='cuda').unsqueeze(0)
+                action = agent.model.pi(agent.model.h(obs))
+                action = action.squeeze().detach()
+            else:
+                # online planing policy
+                action = agent.plan(s, eval_mode=True, step=0, t0=step_count == 0)
+
             s, reward, done, info = env.step(action.cpu().numpy())
             dist_to_goal = np.linalg.norm(env.envs[0].dynamics.pos - env.envs[0].goal)
             # print(dist_to_goal)

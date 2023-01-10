@@ -122,7 +122,7 @@ class QuadObsWrapper(gym.Wrapper):
         dist = np.linalg.norm(obs[0:3])
         obs = self._modify_obs(obs)
         # if the drone is out of bound, then break.
-        if dist >= 5.0:
+        if dist >= 4.0:
             done = True
         return obs, rew, done, info
 

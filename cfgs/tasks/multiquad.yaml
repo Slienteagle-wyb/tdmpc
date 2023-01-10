@@ -18,9 +18,9 @@ env:
   # choose which scenario to run, choices
   # ['static_same_goal', 'static_diff_goal', 'dynamic_same_goal', 'dynamic_diff_goal', 'circular_config',
   # 'ep_lissajous3D', 'ep_rand_bezier', 'swarm_vs_swarm', 'swap_goals', 'dynamic_formations', 'mix', 'tunnel']
-  quads_mode: ep_rand_bezier
+  quads_mode: dynamic_same_goal
   # choices ['circle_xz_vertical', 'circle_yz_vertical', 'circle_horizontal',
-  # 'sphere', 'grid_xz_vertical', 'grid_yz_vertical', 'grid_horizontal']
+  # 'sphere', 'grid_xz_vertical', 'grid_yz_vertical',  'grid_horizontal']
   quads_formation: circle_horizontal
   quads_formation_size: 0.0
   neighbor_obs_type: none

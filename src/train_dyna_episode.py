@@ -85,8 +85,8 @@ def train(cfg):
     assert torch.cuda.is_available()
     set_seed(cfg.seed)
     work_dir = Path().cwd() / __LOGS__ / cfg.task / cfg.modality / cfg.exp_name / str(cfg.seed)
-    # env, agent, buffer = make_quadrotor_env_single(cfg), TDMPCSIM(cfg), RolloutBuffer(cfg)
-    env, agent, buffer = make_quadrotor_env_multi(cfg), TDMPCSIM(cfg), RolloutBuffer(cfg)
+    env, agent, buffer = make_quadrotor_env_single(cfg), TDMPCSIM(cfg), RolloutBuffer(cfg)
+    # env, agent, buffer = make_quadrotor_env_multi(cfg), TDMPCSIM(cfg), RolloutBuffer(cfg)
 
     # Run training
     L = logger.Logger(work_dir, cfg)
@@ -190,7 +190,7 @@ def test_gym_art(cfg):
                 plt.draw()
 
             step_count += 1
-        print(r_sum)
+        print(r_sum, step_count)
         episode_rewards.append(r_sum)
         # print(np.nanmean(episode_rewards))
 
@@ -210,5 +210,5 @@ def test_gym_art(cfg):
 
 
 if __name__ == '__main__':
-    train(parse_cfg(Path().cwd() / __CONFIG__))
-    # test_gym_art(parse_cfg(Path().cwd() / __CONFIG__))
+    # train(parse_cfg(Path().cwd() / __CONFIG__))
+    test_gym_art(parse_cfg(Path().cwd() / __CONFIG__))

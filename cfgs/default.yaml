@@ -27,21 +27,21 @@ similarity_coef: 1.0
 intrinsic_reward_coef: 0.002  # 0.002 for quad, 0.5 for dm_control
 rho: 0.5
 kappa: 0.1
-std_schedule: linear(0.05, ${min_std}, 80000, 80000)  # duration 25000 train step
-horizon_schedule: linear(5, ${horizon}, 1, 0)
+std_schedule: linear(0.05, ${min_std}, 25000, 0)  # duration 25000 train step
+horizon_schedule: linear(5, ${horizon}, 25000, 0)
 explore_schedule: linear(0, ${intrinsic_reward_coef}, 25000, 5000)
-regularization_schedule: linear(0.5, ${mixture_coef}, 1, 0)
+regularization_schedule: linear(0.5, ${mixture_coef}, 1, 5000)
 demo_schedule: linear(0.95, 0.25, 120000, 80000)
 per_alpha: 0.6
 per_beta: 0.4
 grad_clip_norm: 10
-seed_steps: 80000
+seed_steps: 5000
 update_freq: 2
 tau: 0.01
 
 # optim
-lr: 1e-4
-pi_lr: 1e-4
+lr: 1e-3
+pi_lr: 1e-3
 optim_id: 'adamw'
 weight_decay: 0.0
 #sched_kwargs:
@@ -61,10 +61,10 @@ norm_cell: true
 use_wandb: true
 wandb_project: MoPAC
 wandb_entity: Slientea98
-wandb_exp_name: 0109_multi_quadrotor_dynamic_same_goal_finetun11_base_lr1e-4_explore80k_demos0.95_half_seed80k_800k_bound4.0_precede1.0_std0.1
+wandb_exp_name: 0110_quadrotor_setpoint_similarity_base_lr1e-3_repeat2_bound4.0_reward_train_scale50
 
 # mis
-seed: 32
+seed: 72
 pretrained_seed: 11  # the seed of pretrained model
 freeze_encoder: false
 env_horizon: 0  # 0 if normal transition

@@ -335,7 +335,7 @@ class TDMPCSIM():
             # Losses
             rho = (self.cfg.rho ** t)
             # consistency_loss += rho * torch.mean(h.mse(z, next_z), dim=1, keepdim=True)
-            reward_loss += rho * h.mse(reward_pred, reward[t])
+            reward_loss += rho * h.mse(50*reward_pred, 50*reward[t])
             value_loss += rho * (h.mse(Q1, td_target) + h.mse(Q2, td_target))
             priority_loss += rho * (h.l1(Q1, td_target) + h.l1(Q2, td_target))
 
