@@ -13,7 +13,7 @@ def parse_cfg(cfg_path: str) -> OmegaConf:
 	base.merge_with(cli)
 
 	# Modality config
-	if cli.get('modality', base.modality) not in {'state', 'pixels'}:
+	if cli.get('modality', base.modality) not in {'state', 'pixels', 'finetune'}:
 		raise ValueError('Invalid modality: {}'.format(cli.get('modality', base.modality)))
 	modality = cli.get('modality', base.modality)
 	if modality != 'state':

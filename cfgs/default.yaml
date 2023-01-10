@@ -27,20 +27,21 @@ similarity_coef: 1.0
 intrinsic_reward_coef: 0.002  # 0.002 for quad, 0.5 for dm_control
 rho: 0.5
 kappa: 0.1
-std_schedule: linear(0.5, ${min_std}, 25000, 0)  # duration 25000 train step
-horizon_schedule: linear(1, ${horizon}, 25000, 0)
+std_schedule: linear(0.05, ${min_std}, 80000, 80000)  # duration 25000 train step
+horizon_schedule: linear(5, ${horizon}, 1, 0)
 explore_schedule: linear(0, ${intrinsic_reward_coef}, 25000, 5000)
-regularization_schedule: linear(0.05, ${mixture_coef}, 1, 5000)
+regularization_schedule: linear(0.5, ${mixture_coef}, 1, 0)
+demo_schedule: linear(0.95, 0.25, 120000, 80000)
 per_alpha: 0.6
 per_beta: 0.4
 grad_clip_norm: 10
-seed_steps: 5000
+seed_steps: 80000
 update_freq: 2
 tau: 0.01
 
 # optim
-lr: 1e-3
-pi_lr: 1e-3
+lr: 1e-4
+pi_lr: 1e-4
 optim_id: 'adamw'
 weight_decay: 0.0
 #sched_kwargs:
@@ -60,10 +61,12 @@ norm_cell: true
 use_wandb: true
 wandb_project: MoPAC
 wandb_entity: Slientea98
-wandb_exp_name: 1231_quadrotor_setpoint_similarity_vel_clipped_pos_norm_log_dist_crash0.0_pos_bound_omega_thrust_resample
+wandb_exp_name: 0109_multi_quadrotor_dynamic_same_goal_finetun11_base_lr1e-4_explore80k_demos0.95_half_seed80k_800k_bound4.0_precede1.0_std0.1
 
-# misc
-seed: 60
+# mis
+seed: 32
+pretrained_seed: 11  # the seed of pretrained model
+freeze_encoder: false
 env_horizon: 0  # 0 if normal transition
 dream_horizon : 1
 dream_trace: 8
@@ -76,7 +79,7 @@ device: 'cuda'
 normalize: true
 norm_type: 'ln'
 model_path: 'models/model.pt'  #checkpoint_1000
-save_interval: 1000 # count in epoch
+save_interval: 200 # count in epoch
 
 # sac
 q_lr: 1e-3

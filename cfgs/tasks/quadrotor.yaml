@@ -1,17 +1,17 @@
-action_repeat: 1
+action_repeat: 2
 episode_length: 1000/${action_repeat}
 train_steps: 500000/${action_repeat}
 env:
   quad_type: Crazyflie  # quad dynamic type (DefaultQuad, Crazyflie, MediumQuad, RandomQuad)
   raw_control: false
-  raw_control_zero_middle: true
+  raw_control_zero_middle: false
   dynamics_randomize_every: null # how often (int) perform randomize
   dynamics_randomization_ratio: null # random ratio (float) of sampled dyna parameters
-  render: true # if render the 3d scene
+  render: false # if render the 3d scene
   sense_noise: default
   init_random_state: true  # if random initialize the drone state when reset
   obs_repr: 'xyz_vxyz_R_omega' # obs_representation type
   episode_duration: 10.0  # episode time in seconds (1k env_steps/control steps every 10 seconds)
   excite: false
-  resample_goal: false
+  resample_goal: true
   controller_type: omega_thrust  # raw

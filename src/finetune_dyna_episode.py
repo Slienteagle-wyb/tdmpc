@@ -85,8 +85,17 @@ def train(cfg):
     assert torch.cuda.is_available()
     set_seed(cfg.seed)
     work_dir = Path().cwd() / __LOGS__ / cfg.task / cfg.modality / cfg.exp_name / str(cfg.seed)
+    model_dir = Path().cwd() / __LOGS__ / cfg.task / cfg.modality / cfg.exp_name / str(cfg.pretrained_seed)
     # env, agent, buffer = make_quadrotor_env_single(cfg), TDMPCSIM(cfg), RolloutBuffer(cfg)
     env, agent, buffer = make_quadrotor_env_multi(cfg), TDMPCSIM(cfg), RolloutBuffer(cfg)
+    demo_buffer = RolloutBuffer(cfg)
+    # load the pretrained model for fine_tuning
+    fp = os.path.join(model_dir, cfg.model_path)
+    agent.load(fp)
+    print('Have loaded the pretrained model successfully!!')
+    if cfg.freeze_encoder:
+        print('Have frozen the pretrained encoder head')
+        agent.model.freeze_encoder(enable=False)
 
     # Run training
     L = logger.Logger(work_dir, cfg)
@@ -97,12 +106,15 @@ def train(cfg):
         obs = env.reset()
         episode = Episode(cfg, obs)
         while not episode.done:
-            action = agent.plan(obs, step=ctrl_step, t0=episode.first)
+            action = agent.plan(obs, step=ctrl_step, t0=episode.first, fine_tuning=True)
             obs, reward, done, _ = env.step(action.cpu().numpy())
             episode += (obs, action, reward, done)
             ctrl_step += 1
         episode_length = len(episode)
-        buffer += episode
+        if ctrl_step >= cfg.seed_steps:
+            buffer += episode
+        else:
+            demo_buffer += episode
 
         # Update model
         train_metrics = {}
@@ -110,7 +122,7 @@ def train(cfg):
             num_updates = cfg.seed_steps if iters == 0 else episode_length
             for i in range(num_updates):
                 iters += 1
-                train_metrics.update(agent.update(buffer, iters))
+                train_metrics.update(agent.finetune(buffer, iters, demo_buffer))
 
         # Log training episode
         episode_idx += 1
@@ -133,82 +145,12 @@ def train(cfg):
             L.log(common_metrics, category='eval')
 
         # save model every save epoch interval
-        if episode_idx % int(cfg.save_interval) == 0 and episode_idx >= 1000:
+        if episode_idx % int(cfg.save_interval) == 0 and episode_idx >= 500:
             L.save_model(agent, episode_idx)
 
     L.finish(agent)
     print('Training completed successfully')
 
 
-def test_gym_art(cfg):
-    assert torch.cuda.is_available()
-    set_seed(cfg.seed)
-    work_dir = Path().cwd() / __LOGS__ / cfg.task / cfg.modality / cfg.exp_name / str(cfg.seed)
-    env, agent, buffer = make_quadrotor_env_single(cfg), TDMPCSIM(cfg), RolloutBuffer(cfg)
-    # load the model for test
-    fp = os.path.join(work_dir, cfg.model_path)
-    agent.load(fp)
-    episode_rewards = []
-    num_rollouts = 10
-    plot_thrusts = False
-    plot_step = None
-    plot_obs = False
-
-    start_time = time.time()
-    for rollout_id in tqdm.tqdm(range(num_rollouts)):
-        s = env.reset()
-        done = False
-        step_count, r_sum = 0, 0
-        observations = []
-        actions = []
-        thrusts = []
-        csv_data = []
-        while not done:
-            if cfg.env.render and (step_count % 2 == 0):
-                env.render()
-            action = agent.plan(s, eval_mode=True, step=0, t0=step_count == 0)
-            s, reward, done, info = env.step(action.cpu().numpy())
-            r_sum += reward
-            actions.append((action.cpu().numpy() + np.ones(4)) * 0.5)
-            thrusts.append(env.dynamics.thrust_cmds_damp)
-            observations.append(s)
-            # record the relative pos to target and attitude represented by quaternion
-            quat = R2quat(rot=s[6:15])
-            csv_data.append(np.concatenate([np.array([1.0 / env.control_freq * step_count]), s[0:3], quat]))
-
-            if plot_step is not None and step_count % plot_step == 0:
-                plt.clf()
-                if plot_obs:
-                    observations_arr = np.array(observations)
-                    # print('observations array shape', observations_arr.shape)
-                    dimenstions = observations_arr.shape[1]
-                    for dim in range(15, 18, 1):
-                        plt.plot(observations_arr[:, dim])
-                    plt.legend([str(x) for x in range(observations_arr.shape[1])])
-
-                plt.pause(0.05)  # have to pause otherwise does not draw
-                plt.draw()
-
-            step_count += 1
-        print(r_sum)
-        episode_rewards.append(r_sum)
-        # print(np.nanmean(episode_rewards))
-
-        if plot_thrusts:
-            plt.figure(3, figsize=(10, 10))
-            ep_time = np.linspace(0, env.control_freq, cfg.episode_length)
-            actions = np.array(actions)
-            thrusts = np.array(thrusts)
-            for i in range(2):
-                plt.plot(ep_time, actions[:, i], label="Thrust desired %d" % i)
-                plt.plot(ep_time, thrusts[:, i], label="Thrust produced %d" % i)
-            plt.legend()
-            plt.show(block=False)
-            input("Press Enter to continue...")
-        print("##############################################################")
-        print("Total time: ", time.time() - start_time)
-
-
 if __name__ == '__main__':
     train(parse_cfg(Path().cwd() / __CONFIG__))
-    # test_gym_art(parse_cfg(Path().cwd() / __CONFIG__))

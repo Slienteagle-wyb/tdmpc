@@ -1,0 +1,45 @@
+action_repeat: 1
+episode_length: 1600/${action_repeat}
+train_steps: 800000/${action_repeat}
+env:
+  quads_num_agents: 1 # total num of the quad in one environment
+  quad_type: Crazyflie  # quad dynamic type (DefaultQuad, Crazyflie, MediumQuad, RandomQuad)
+  raw_control: false
+  raw_control_zero_middle: false
+  dyn_randomize_every: null # how often (int) perform randomize
+  dynamics_randomization_ratio: null # random ratio (float) of sampled dyna parameters
+  render: true # if render the 3d scene
+  sense_noise: default
+  init_random_state: true  # if random initialize the drone state when reset
+  quads_obs_repr: 'xyz_vxyz_R_omega' # obs_representation type
+  episode_duration: 16.0  # episode time in seconds (1k env_steps/control steps every 10 seconds)?
+  controller_type: omega_thrust  # choices ['omega_thrust', 'raw_thrust']
+
+  # choose which scenario to run, choices
+  # ['static_same_goal', 'static_diff_goal', 'dynamic_same_goal', 'dynamic_diff_goal', 'circular_config',
+  # 'ep_lissajous3D', 'ep_rand_bezier', 'swarm_vs_swarm', 'swap_goals', 'dynamic_formations', 'mix', 'tunnel']
+  quads_mode: ep_rand_bezier
+  # choices ['circle_xz_vertical', 'circle_yz_vertical', 'circle_horizontal',
+  # 'sphere', 'grid_xz_vertical', 'grid_yz_vertical', 'grid_horizontal']
+  quads_formation: circle_horizontal
+  quads_formation_size: 0.0
+  neighbor_obs_type: none
+  quads_use_numba: true
+  quads_settle: false
+  quads_settle_range_meters: 1.0
+  quads_vel_reward_out_range: 0.8
+  quads_obstacle_mode: no_obstacles  # choices: ['no_obstacles', 'static', 'dynamic']
+  quads_obstacle_num: 0
+  quads_obstacle_type: sphere # choices: ['sphere', 'cube', 'random']
+  quads_obstacle_size: 0.0
+  quads_obstacle_traj: gravity # ['gravity', 'electron', 'mix']
+  quads_collision_hitbox_radius: 2.0
+  quads_collision_falloff_radius: 4.0
+  quads_local_metric: dist # choices ['dist', 'dist_inverse'], 'The main part of evaluate the closest drones'
+  quads_local_coeff: 1.0
+  quads_view_mode: local # choose which kind of view mode to use ['local', 'global']
+  quads_adaptive_env: false
+  quads_local_obs: -1 # Number of neighbors to consider. -1=all neighbors. 0=blind agents, 0<n<num_agents-1 = nonzero number of agents
+  replay_buffer_sample_prob: 0.0
+  quads_obstacle_obs_mode: relative
+  quads_obst_penalty_fall_off: 10

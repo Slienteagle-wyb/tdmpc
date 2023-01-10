@@ -36,6 +36,9 @@ class TOLD(nn.Module):
         for m in [self._Q1, self._Q2]:
             h.set_requires_grad(m, enable)
 
+    def freeze_encoder(self, enable=False):
+        h.set_requires_grad(self._encoder, enable)
+
     def h(self, obs):
         """Encodes an observation into its latent representation (h)."""
         if self.cfg.modality == 'pixels':
@@ -84,6 +87,7 @@ class TDMPCSIM():
         self.model_target.eval()
         self.reward_rms = RunningMeanStd()
         self.plan_horizon = 1
+        self.batch_size = cfg.batch_size
 
         total_epochs = int(cfg.train_steps / cfg.episode_length)
         self._optim_initialize(total_epochs)
@@ -129,7 +133,7 @@ class TDMPCSIM():
         return G
 
     @torch.no_grad()
-    def plan(self, obs, eval_mode=False, step=None, t0=True):
+    def plan(self, obs, eval_mode=False, step=None, t0=True, fine_tuning=False):
         """
 		Plan next action using TD-MPC inference.
 		obs: raw input observation.
@@ -138,7 +142,7 @@ class TDMPCSIM():
 		t0: whether current step is the first step of an episode.
 		"""
         # Seed steps
-        if step < self.cfg.seed_steps and not eval_mode:
+        if step < self.cfg.seed_steps and not eval_mode and not fine_tuning:
             return torch.empty(self.cfg.action_dim, dtype=torch.float32, device=self.device).uniform_(-1, 1)
 
         # Sample policy trajectories
@@ -368,4 +372,88 @@ class TDMPCSIM():
                 'grad_norm': float(grad_norm),
                 # 'intrinsic_batch_reward_mean': intrinsic_rewards.mean().item(),
                 # 'current_explore_coef': explore_coef,
+                'mixture_coef': self.mixture_coef}
+
+    def finetune(self, replay_buffer, step, demo_buffer=None):
+        """Main update function. Corresponds to one iteration of the TOLD model learning."""
+        # obs [batch, state_dim], actions [horizon+1, batch, act_dim]
+        self.std = h.linear_schedule(self.cfg.std_schedule, step)
+        self.demo_batch_size = int(h.linear_schedule(self.cfg.demo_schedule, step) * self.batch_size)
+        replay_buffer.batch_size = self.batch_size - self.demo_batch_size
+        demo_buffer.batch_size = self.demo_batch_size
+
+        obs, next_obses, action, reward, idxs, weights = replay_buffer.sample()
+        demo_obs, demo_next_obses, demo_action, demo_reward, demo_idxs, demo_weights = demo_buffer.sample()
+
+        obs, next_obses, action, reward, idxs, weights = (
+            torch.cat([obs, demo_obs]),
+            torch.cat([next_obses, demo_next_obses], dim=1),
+            torch.cat([action, demo_action], dim=1),
+            torch.cat([reward, demo_reward], dim=1),
+            torch.cat([idxs, demo_idxs]),
+            torch.cat([weights, demo_weights])
+        )
+
+        self.optim.zero_grad(set_to_none=True)
+        self.model.train()
+
+        # Representation
+        z = self.model.h(self.aug(obs))
+        zs = [z.detach()]
+        zs_query, zs_key = [], []
+
+        consistency_loss, reward_loss, value_loss, priority_loss = 0, 0, 0, 0
+        for t in range(self.cfg.horizon):
+            # Predictions
+            Q1, Q2 = self.model.Q(z, action[t])
+            z, reward_pred = self.model.next(z, action[t])
+            with torch.no_grad():
+                next_obs = self.aug(next_obses[t])
+                next_z = self.model_target.h(next_obs)
+                td_target = self._td_target(next_obs, reward[t])
+            zs_query.append(z)
+            zs_key.append(next_z.detach())
+            zs.append(z.detach())
+
+            # Losses
+            rho = (self.cfg.rho ** t)
+            # consistency_loss += rho * torch.mean(h.mse(z, next_z), dim=1, keepdim=True)
+            reward_loss += rho * h.mse(reward_pred, reward[t])
+            value_loss += rho * (h.mse(Q1, td_target) + h.mse(Q2, td_target))
+            priority_loss += rho * (h.l1(Q1, td_target) + h.l1(Q2, td_target))
+
+        similarity_loss = self.similarity_loss(zs_query, zs_key)
+        similarity_loss = similarity_loss.reshape(self.cfg.horizon, self.cfg.batch_size, -1).mean(dim=0)  # (batch_size, )
+
+        # Optimize model
+        total_loss = self.cfg.similarity_coef * similarity_loss.clamp(max=1e4) + \
+                     self.cfg.reward_coef * reward_loss.clamp(max=1e4) + \
+                     self.cfg.value_coef * value_loss.clamp(max=1e4)
+
+        weighted_loss = (total_loss * weights).mean()
+        weighted_loss.register_hook(lambda grad: grad * (1 / self.cfg.horizon))
+        weighted_loss.backward()
+        grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip_norm,
+                                                   error_if_nonfinite=False)
+        self.optim.step()
+        priority = priority_loss.clamp(max=1e4).detach()
+        replay_buffer.update_priorities(idxs[:replay_buffer.batch_size], priority[:replay_buffer.batch_size])
+        demo_buffer.update_priorities(demo_idxs, priority[replay_buffer.batch_size:])
+
+        # Update policy + target network
+        pi_loss = self.update_pi(zs)
+        if step % self.cfg.update_freq == 0:
+            h.ema(self.model, self.model_target, self.cfg.tau)
+
+        self.model.eval()
+        return {'consistency_loss': float(similarity_loss.mean().item()),
+                'reward_loss': float(reward_loss.mean().item()),
+                'value_loss': float(value_loss.mean().item()),
+                'pi_loss': pi_loss,
+                'total_loss': float(total_loss.mean().item()),
+                'weighted_loss': float(weighted_loss.mean().item()),
+                'grad_norm': float(grad_norm),
+                # 'intrinsic_batch_reward_mean': intrinsic_rewards.mean().item(),
+                # 'current_explore_coef': explore_coef,
+                'current_demo_batch': self.demo_batch_size,
                 'mixture_coef': self.mixture_coef}

@@ -4,7 +4,6 @@ import tqdm
 warnings.filterwarnings('ignore')
 import os
 os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
-# os.environ['MUJOCO_GL'] = 'egl'
 import torch
 import numpy as np
 import gym
@@ -15,10 +14,9 @@ import random
 from pathlib import Path
 from cfg import parse_cfg
 from tdmpc.envs.env import make_env
-from tdmpc.envs.quad_envs import make_quadrotor_env_single, make_quadrotor_env_multi
-from algorithm.tdmpc import TDMPC
+from tdmpc.envs.quad_envs import make_quadrotor_env_multi
 from algorithm.tdmpc_similarity import TDMPCSIM
-from algorithm.helper import Episode, ReplayBuffer, RolloutBuffer
+from algorithm.helper import Episode, RolloutBuffer
 from gym_art.quadrotor_single.quad_utils import *
 import logger
 
@@ -85,7 +83,6 @@ def train(cfg):
     assert torch.cuda.is_available()
     set_seed(cfg.seed)
     work_dir = Path().cwd() / __LOGS__ / cfg.task / cfg.modality / cfg.exp_name / str(cfg.seed)
-    # env, agent, buffer = make_quadrotor_env_single(cfg), TDMPCSIM(cfg), RolloutBuffer(cfg)
     env, agent, buffer = make_quadrotor_env_multi(cfg), TDMPCSIM(cfg), RolloutBuffer(cfg)
 
     # Run training
@@ -133,18 +130,18 @@ def train(cfg):
             L.log(common_metrics, category='eval')
 
         # save model every save epoch interval
-        if episode_idx % int(cfg.save_interval) == 0 and episode_idx >= 1000:
+        if episode_idx % int(cfg.save_interval) == 0:
             L.save_model(agent, episode_idx)
 
     L.finish(agent)
     print('Training completed successfully')
 
 
-def test_gym_art(cfg):
+def test_gym_art_multi_agent(cfg):
     assert torch.cuda.is_available()
     set_seed(cfg.seed)
     work_dir = Path().cwd() / __LOGS__ / cfg.task / cfg.modality / cfg.exp_name / str(cfg.seed)
-    env, agent, buffer = make_quadrotor_env_single(cfg), TDMPCSIM(cfg), RolloutBuffer(cfg)
+    env, agent, buffer = make_quadrotor_env_multi(cfg), TDMPCSIM(cfg), RolloutBuffer(cfg)
     # load the model for test
     fp = os.path.join(work_dir, cfg.model_path)
     agent.load(fp)
@@ -168,9 +165,12 @@ def test_gym_art(cfg):
                 env.render()
             action = agent.plan(s, eval_mode=True, step=0, t0=step_count == 0)
             s, reward, done, info = env.step(action.cpu().numpy())
+            dist_to_goal = np.linalg.norm(env.envs[0].dynamics.pos - env.envs[0].goal)
+            # print(dist_to_goal)
+            # print(s[0:3], env.envs[0].dynamics.pos, env.envs[0].goal)
             r_sum += reward
             actions.append((action.cpu().numpy() + np.ones(4)) * 0.5)
-            thrusts.append(env.dynamics.thrust_cmds_damp)
+            thrusts.append(env.envs[0].dynamics.thrust_cmds_damp)
             observations.append(s)
             # record the relative pos to target and attitude represented by quaternion
             quat = R2quat(rot=s[6:15])
@@ -190,7 +190,7 @@ def test_gym_art(cfg):
                 plt.draw()
 
             step_count += 1
-        print(r_sum)
+        print(r_sum, step_count)
         episode_rewards.append(r_sum)
         # print(np.nanmean(episode_rewards))
 
@@ -210,5 +210,5 @@ def test_gym_art(cfg):
 
 
 if __name__ == '__main__':
-    train(parse_cfg(Path().cwd() / __CONFIG__))
-    # test_gym_art(parse_cfg(Path().cwd() / __CONFIG__))
+    # train(parse_cfg(Path().cwd() / __CONFIG__))
+    test_gym_art_multi_agent(parse_cfg(Path().cwd() / __CONFIG__))
