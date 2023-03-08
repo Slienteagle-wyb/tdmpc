@@ -1,7 +1,7 @@
 train_steps: 3000000/${action_repeat}
 action_repeat: 2
-action_latent: 32
 iterations: 12
 latent_dim: 128
-explore_schedule: linear(0, ${intrinsic_reward_coef}, 1350000, 150000)
-regularization_schedule: linear(0.05, ${mixture_coef}, 100000, 50000)
+batch_size: 1024
+explore_schedule: linear(0, ${intrinsic_reward_coef}, 250000, 50000)
+regularization_schedule: linear(0.05, ${mixture_coef}, 1, 50000)

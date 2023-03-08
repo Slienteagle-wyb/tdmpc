@@ -1,0 +1,12 @@
+action_repeat: 2
+episode_length: 100/${action_repeat}
+train_steps: 100000/${action_repeat}
+min_std: 0.05
+
+std_schedule: linear(0.5, ${min_std}, 2500, 0)  # duration 25000 train step
+horizon_schedule: linear(1, ${horizon}, 2500, 0)
+explore_schedule: linear(0, ${intrinsic_reward_coef}, 2500, 500)
+regularization_schedule: linear(0.05, ${mixture_coef}, 1, 500)
+
+eval_freq: 2000
+seed_steps: 500

@@ -14,8 +14,8 @@ import time
 import random
 from pathlib import Path
 from cfg import parse_cfg
-from tdmpc.envs.env import make_env
-from tdmpc.envs.quad_envs import make_quadrotor_env_single, make_pybullet_drone_env
+from envs.env import make_env, make_mujoco_env
+from envs.quad_envs import make_quadrotor_env_single, make_pybullet_drone_env
 from algorithm.tdmpc import TDMPC
 from algorithm.tdmpc_similarity import TDMPCSIM
 from algorithm.helper import Episode, ReplayBuffer
@@ -77,9 +77,9 @@ def train(cfg):
 	assert torch.cuda.is_available()
 	set_seed(cfg.seed)
 	work_dir = Path().cwd() / __LOGS__ / cfg.task / cfg.modality / cfg.exp_name / str(cfg.seed)
-	# env, agent, buffer = make_env(cfg), TDMPC(cfg), ReplayBuffer(cfg, latent_plan=True)
-	env, agent, buffer = make_quadrotor_env_single(cfg), TDMPCSIM(cfg), ReplayBuffer(cfg, latent_plan=True)
-	# env, agent, buffer = make_env(cfg), TDMPCSIM(cfg), ReplayBuffer(cfg, latent_plan=True)
+	env, agent, buffer = make_mujoco_env(cfg), TDMPC(cfg), ReplayBuffer(cfg, latent_plan=True)
+	# env, agent, buffer = make_quadrotor_env_single(cfg), TDMPCSIM(cfg), ReplayBuffer(cfg, latent_plan=True)
+	# env, agent, buffer = make_mujoco_env(cfg), TDMPCSIM(cfg), ReplayBuffer(cfg, latent_plan=True)
 	
 	# Run training
 	L = logger.Logger(work_dir, cfg)

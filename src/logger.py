@@ -10,8 +10,7 @@ from termcolor import colored
 from omegaconf import OmegaConf
 
 CONSOLE_FORMAT = [('episode', 'E', 'int'), ('env_step', 'S', 'int'), ('episode_reward', 'R', 'float'),
-				  ('episode_reward_pi', 'PR', 'float'), ('episode_reward_mean', 'MR', 'float'),
-				  ('episode_length', 'EL', 'int'), ('total_time', 'T', 'time')]
+				  ('episode_reward_pi', 'PR', 'float'), ('episode_length', 'EL', 'int'), ('total_time', 'T', 'time')]
 AGENT_METRICS = ['consistency_loss', 'reward_loss', 'value_loss', 'total_loss', 'weighted_loss', 'pi_loss', 'grad_norm']
 
 

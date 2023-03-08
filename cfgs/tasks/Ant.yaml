@@ -1,2 +1,2 @@
 action_repeat: 2
-min_std: 0.05
+latent_dim: 50

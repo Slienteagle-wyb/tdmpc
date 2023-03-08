@@ -55,6 +55,16 @@ def set_requires_grad(net, value):
         param.requires_grad_(value)
 
 
+def symlog(x):
+    """Symmetric log function."""
+    return torch.sign(x) * torch.log(1 + torch.abs(x))
+
+
+def symexp(x):
+    """Exponential log function."""
+    return torch.sign(x) * (torch.exp(torch.abs(x)) - 1)
+
+
 class TruncatedNormal(pyd.Normal):
     """Utility class implementing the truncated normal distribution."""
 
@@ -172,7 +182,7 @@ def mlp_norm(in_dim, hidden_dim, out_dim, cfg, act_fn=nn.ELU(), norm_type='bn'):
 def q(cfg, act_fn=nn.ELU()):
     """Returns a Q-function that uses Layer Normalization."""
     return nn.Sequential(nn.Linear(cfg.latent_dim + cfg.action_dim, cfg.mlp_dim), nn.LayerNorm(cfg.mlp_dim), nn.Tanh(),
-                         nn.Linear(cfg.mlp_dim, cfg.mlp_dim), nn.ELU(),
+                         nn.Linear(cfg.mlp_dim, cfg.mlp_dim), nn.LayerNorm(cfg.mlp_dim), nn.ELU(),
                          nn.Linear(cfg.mlp_dim, 1))
 
 
@@ -268,7 +278,6 @@ class Episode(object):
         self.action = torch.empty((cfg.episode_length, cfg.action_dim), dtype=torch.float32, device=self.device)
         self.reward = torch.empty((cfg.episode_length,), dtype=torch.float32, device=self.device)
         self.cumulative_reward = 0
-        self.episode_reward_mean = 0
         self.done = False
         self._idx = 0
 
@@ -289,7 +298,6 @@ class Episode(object):
         self.reward[self._idx] = reward
         self._idx += 1
         self.cumulative_reward += reward
-        self.episode_reward_mean = self.cumulative_reward / self._idx
         self.done = done
 
 
@@ -436,12 +444,12 @@ class RolloutBuffer:
         self.horizon = self.cfg.horizon
 
     def __add__(self, episode: Episode):
-        if len(episode) > self.capacity - self.idx:
+        if len(episode) > self.capacity - self.idx and self.idx != 0:
             # mask the left empty clip in the buffer
-            self._priorities[self.idx:] = 0
             print('the replay buffer is full, and the sum of transition is :', self.idx)
-            self._full = True
+            self._priorities[self.idx:] = 0
             self.idx = 0
+            self._full = True
         else:
             self.add(episode)
         return self
@@ -449,8 +457,8 @@ class RolloutBuffer:
     def add(self, episode: Episode):
         episode_length = len(episode)
         self._obs[self.idx:self.idx + episode_length] = episode.obs[:episode_length] if \
-        self.cfg.modality == 'state' else episode.obs[:episode_length, -3:]
-        self._last_obs.append(episode.obs[-1])
+            self.cfg.modality == 'state' else episode.obs[:episode_length, -3:]
+        self._last_obs.append(episode.obs[-1])  # last obs of a segment of trajectory
         # self._last_obs[self.idx // self.cfg.episode_length] = episode.obs[-1]
         self._action[self.idx:self.idx + episode_length] = episode.action[:episode_length]
         self._reward[self.idx:self.idx + episode_length] = episode.reward[:episode_length]

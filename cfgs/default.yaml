@@ -20,18 +20,18 @@ batch_size: 512
 max_buffer_size: 1000000
 horizon: 5
 similarity_horizon: 1
-reward_coef: 0.5
-value_coef: 0.1
-consistency_coef: 2
-similarity_coef: 1.0
-intrinsic_reward_coef: 0.002  # 0.002 for quad, 0.5 for dm_control
-rho: 0.5
+reward_coef: 0.5  # 0.2 for mujoco, 0.5 for dm_control
+value_coef: 0.1  # 0.1 default
+consistency_coef: 0.4  # 2.0 for mlp, 0.4 for drnn
+similarity_coef: 0.2  # 0.2 drnn, 1.0 mlp
+intrinsic_reward_coef: 0.5  # 0.002 for quad, 0.5 for dm_control
+rho: 1.0
 kappa: 0.1
-std_schedule: linear(0.05, ${min_std}, 25000, 0)  # duration 25000 train step
-horizon_schedule: linear(5, ${horizon}, 25000, 0)
+std_schedule: linear(0.5, ${min_std}, 25000, 0)  # duration 25000 train step
+horizon_schedule: linear(1, ${horizon}, 25000, 0)
 explore_schedule: linear(0, ${intrinsic_reward_coef}, 25000, 5000)
-regularization_schedule: linear(0.5, ${mixture_coef}, 1, 5000)
-demo_schedule: linear(0.95, 0.25, 120000, 80000)
+regularization_schedule: linear(0.05, ${mixture_coef}, 1, 5000)
+demo_schedule: linear(0.95, 0.25, 48000, 32000)
 per_alpha: 0.6
 per_beta: 0.4
 grad_clip_norm: 10
@@ -42,13 +42,9 @@ tau: 0.01
 # optim
 lr: 1e-3
 pi_lr: 1e-3
+q_lr: 1e-4
 optim_id: 'adamw'
 weight_decay: 0.0
-#sched_kwargs:
-#  sched_id: 'cosine'
-#  min_lr: 1e-6
-#  warmup_lr_init: 1e-5
-#  warmup_epochs: 20
 
 # architecture
 enc_dim: 256
@@ -61,17 +57,18 @@ norm_cell: true
 use_wandb: true
 wandb_project: MoPAC
 wandb_entity: Slientea98
-wandb_exp_name: 0110_quadrotor_setpoint_similarity_base_lr1e-3_repeat2_bound4.0_reward_train_scale50
+wandb_exp_name: 0308_quadruped_walk_plan2expl0.0_schded25k_mix0.5_gru_full_pred_rho1.0_r0.5_v0.1_s0.2_batch512_analytic_Q_pi_lr(1e-3)_mean_len
 
 # mis
-seed: 72
-pretrained_seed: 11  # the seed of pretrained model
+seed: 127
+pretrained_seed: 35  # the seed of pretrained model
 freeze_encoder: false
 env_horizon: 0  # 0 if normal transition
 dream_horizon : 1
 dream_trace: 8
 exp_name: default
 eval_freq: 20000
+eval_freq_episodes: 20
 eval_episodes: 10
 save_video: false
 save_model: true
@@ -82,7 +79,16 @@ model_path: 'models/model.pt'  #checkpoint_1000
 save_interval: 200 # count in epoch
 
 # sac
-q_lr: 1e-3
 gamma: 0.99
 sac_tau: 0.005
 latent_policy: false
+
+# plan2expl
+plan2expl: false
+ensemble_lr: 3e-4
+num_ensembles: 5
+#sched_kwargs:
+#  sched_id: 'cosine'
+#  min_lr: 1e-4
+#  warmup_lr_init: 1e-5
+#  warmup_epochs: 20

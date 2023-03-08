@@ -3,6 +3,7 @@ import numpy as np
 from swarm_rl.env_wrappers.reward_shaping import DEFAULT_QUAD_REWARD_SHAPING_SINGLE, DEFAULT_QUAD_REWARD_SHAPING
 from gym_art.quadrotor_single.quadrotor import QuadrotorEnv
 from gym_art.quadrotor_multi.quadrotor_multi import QuadrotorEnvMulti
+from gym_art.quadrotor_multi.quadrotor_racing import QuadrotorEnvRacing
 import gym_pybullet_drones
 
 
@@ -52,7 +53,7 @@ def make_quadrotor_env_multi(cfgs):
     extended_obs = cfg.neighbor_obs_type
     use_replay_buffer = cfg.replay_buffer_sample_prob > 0.0
 
-    env = QuadrotorEnvMulti(
+    env = QuadrotorEnvRacing(
         num_agents=cfg.quads_num_agents,
         dynamics_params=cfg.quad_type, raw_control=cfg.raw_control, raw_control_zero_middle=cfg.raw_control_zero_middle,
         dynamics_randomize_every=cfg.dyn_randomize_every, dynamics_change=dynamics_change, dyn_sampler_1=sampler_1,
@@ -123,6 +124,7 @@ class QuadObsWrapper(gym.Wrapper):
         obs = self._modify_obs(obs)
         # if the drone is out of bound, then break.
         if dist >= 4.0:
+            print('out of range!!!!')
             done = True
         return obs, rew, done, info
 
@@ -135,7 +137,7 @@ class ActRepeatWrapper(gym.Wrapper):
 
     def step(self, action):
         reward = 0.0
-        discount = 1.0
+        discount = 0.99
         for i in range(self._num_repeat):
             obs, rew, done, info = self._env.step(action)
             reward += rew * discount

@@ -145,7 +145,7 @@ def train(cfg):
             L.log(common_metrics, category='eval')
 
         # save model every save epoch interval
-        if episode_idx % int(cfg.save_interval) == 0 and episode_idx >= 500:
+        if episode_idx % int(cfg.save_interval) == 0:
             L.save_model(agent, episode_idx)
 
     L.finish(agent)

@@ -1,32 +1,11 @@
 import torch
 import torch.nn as nn
-import algorithm.helper as h
+import src.algorithm.helper as h
+from torch import jit
+from src.models.rnns import NormGRUCell
 import torch.nn.functional as F
 from copy import deepcopy
-
-
-class NormGRUCell(nn.Module):
-    def __init__(self, input_size, hidden_size):
-        super().__init__()
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.weight_ih = nn.Linear(input_size, 3 * hidden_size, bias=False)
-        self.weight_hh = nn.Linear(hidden_size, 3 * hidden_size, bias=False)
-        self.ln_reset = nn.LayerNorm(hidden_size, eps=1e-3)
-        self.ln_update = nn.LayerNorm(hidden_size, eps=1e-3)
-        self.ln_newval = nn.LayerNorm(hidden_size, eps=1e-3)
-
-    def forward(self, input, state):
-        gates_i = self.weight_ih(input)
-        gates_h = self.weight_hh(state)
-        reset_i, update_i, newval_i = gates_i.chunk(3, 1)
-        reset_h, update_h, newval_h = gates_h.chunk(3, 1)
-
-        reset = torch.sigmoid(self.ln_reset(reset_i + reset_h))
-        update = torch.sigmoid(self.ln_update(update_i + update_h))
-        newval = torch.tanh(self.ln_newval(newval_i + reset * newval_h))
-        h = update * newval + (1 - update) * state
-        return h
+from torch.distributions.normal import Normal
 
 
 class DGruDyna(nn.Module):
@@ -50,3 +29,26 @@ class DGruDyna(nn.Module):
         h = self.gru_cell(x, h_prev)
         z_pred = self.prior_mlp(h)
         return z_pred, h
+
+
+class OneStepDyna(jit.ScriptModule):
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = deepcopy(cfg)
+        self.fc1 = nn.Linear(cfg.hidden_dim+cfg.action_dim, cfg.hidden_dim)
+        self.fc2 = nn.Linear(cfg.hidden_dim+cfg.action_dim, cfg.latent_dim)
+        self.fc3 = nn.Linear(cfg.latent_dim+cfg.action_dim, cfg.latent_dim)
+        self.apply(h.orthogonal_init)
+
+    # one_step prediction model takes hidden state and action to predict next latent state
+    def forward(self, hidden, a):
+        a = a.detach()
+        x = torch.cat([hidden.detach(), a], dim=-1)
+        h1 = F.elu(self.fc1(x))
+        h1 = torch.cat([h1, a], dim=-1)
+        h2 = F.elu(self.fc2(h1))
+        h2 = torch.cat([h2, a], dim=-1)
+        z_mean = self.fc3(h2)
+        dist = Normal(z_mean, torch.ones_like(z_mean).cuda())
+        dist = torch.distributions.Independent(dist, 1)
+        return dist

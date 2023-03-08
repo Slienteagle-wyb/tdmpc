@@ -1,5 +1,5 @@
 import warnings
-
+import datetime
 warnings.filterwarnings('ignore')
 import os
 
@@ -14,7 +14,7 @@ import time
 import random
 from pathlib import Path
 from cfg import parse_cfg
-from env import make_env
+from envs.env import make_env, make_hms_env, make_mujoco_env
 from algorithm.tdmpc import TDMPC
 from algorithm.tdmpc_similarity import TDMPCSIM
 from algorithm.tdmpc_similarity_drnn import TdMpcSimDssm
@@ -43,7 +43,7 @@ def evaluate(env, agent, num_episodes, step, env_step, video):
         while not done:
             if t == 0 or t % 1 == 0:
                 hidden = agent.model.init_hidden_state(batch_size=1, device='cuda')
-            action, hidden = agent.plan(obs, hidden, eval_mode=True, step=step, t0=t == 0)
+            action, hidden, _ = agent.plan(obs, hidden, eval_mode=True, step=step, t0=t == 0)
             obs, reward, done, _ = env.step(action.cpu().numpy())
             ep_reward += reward
             if video: video.record(env)
@@ -63,7 +63,7 @@ def evaluate_pi(env, agent, num_episodes, step, env_step, video):
         while not done:
             obs = torch.tensor(obs, dtype=torch.float32, device='cuda').unsqueeze(0)
             action = agent.model.pi(agent.model.h(obs))
-            obs, reward, done, _ = env.step(action.detach().cpu().numpy())
+            obs, reward, done, _ = env.step(action.squeeze().detach().cpu().numpy())
             ep_reward += reward
             if video:
                 video.record(env)
@@ -82,6 +82,7 @@ def train(cfg):
     # env, agent, buffer = make_env(cfg), TDMPC(cfg), ReplayBuffer(cfg, latent_plan=True)
     # env, agent, buffer = make_env(cfg), TDMPCSIM(cfg), ReplayBuffer(cfg, latent_plan=True)
     env, agent, buffer = make_env(cfg), TdMpcSimDssm(cfg), ReplayBuffer(cfg, latent_plan=True)
+
     # Run training
     L = logger.Logger(work_dir, cfg)
     episode_idx, start_time = 0, time.time()
@@ -92,11 +93,15 @@ def train(cfg):
         episode = Episode(cfg, obs)
         hidden = None
         total_train_step = step
+        intrinsic_reward_mean_list = []
+        current_std_mean_list = []
         while not episode.done:
             # reset the hidden state for gru every cfg.horizon step.
             if episode.first or total_train_step % 1 == 0:
                 hidden = agent.model.init_hidden_state(batch_size=1, device='cuda')
-            action, hidden = agent.plan(obs, hidden, step=step, t0=episode.first)
+            action, hidden, plan_metrics = agent.plan(obs, hidden, step=step, t0=episode.first)
+            intrinsic_reward_mean_list.append(plan_metrics['intrinsic_reward_mean'])
+            current_std_mean_list.append(plan_metrics['current_std'])
             obs, reward, done, _ = env.step(action.cpu().numpy())
             episode += (obs, action, reward, done)
             total_train_step += 1
@@ -118,7 +123,9 @@ def train(cfg):
             'step': step,
             'env_step': env_step,
             'total_time': time.time() - start_time,
-            'episode_reward': episode.cumulative_reward}
+            'episode_reward': episode.cumulative_reward,
+            'intrinsic_reward_mean': np.mean(intrinsic_reward_mean_list),
+            'current_std': np.mean(current_std_mean_list), }
         train_metrics.update(common_metrics)
         L.log(train_metrics, category='train')
 

@@ -5,6 +5,9 @@ import numpy as np
 from dm_control import suite
 from dm_control.suite.wrappers import action_scale, pixels
 from dm_env import StepType, specs
+from mjrl.utils.gym_env import GymEnv
+from mj_envs import hand_manipulation_suite
+from gym.wrappers import RecordEpisodeStatistics, NormalizeReward
 import gym
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning) 
@@ -287,13 +290,101 @@ def make_env(cfg):
 	return env
 
 
+class TimeLimitWrapper(gym.Wrapper):
+	"""
+	Wrapper for gym environments to limit episode length.
+	"""
+	def __init__(self, env):
+		gym.Wrapper.__init__(self, env)
+
+	def reset(self):
+		self._elapsed_steps = 0
+		return self.env.reset()
+
+	def step(self, action):
+		observation, reward, done, info = self.env.step(action)
+		self._elapsed_steps += 1
+		if self._elapsed_steps >= self.spec.max_episode_steps:
+			done = True
+			info['TimeLimit.truncated'] = True
+		else:
+			done = False
+		return observation, reward, done, info
+
+
+class ActRepeatWrapper(gym.Wrapper):
+	"""
+	Wrapper for mujoco environments to repeat actions.
+	"""
+	def __init__(self, env, act_repeat):
+		gym.Wrapper.__init__(self, env)
+		self.act_repeat = act_repeat
+
+	def step(self, action):
+		if self.act_repeat == 1:
+			obs, cum_reward, done, info = self.env.step(action)
+		else:
+			cum_reward = 0
+			for _ in range(self.act_repeat):
+				obs, reward, done, info = self.env.step(action)
+				cum_reward += reward
+				if done:
+					break
+		return obs, cum_reward, done, info
+
+
+class TransformReward(gym.Wrapper):
+	def __init__(self, env: gym.Env, f):
+		super().__init__(env)
+		assert callable(f)
+		self.f = f
+
+	def reward(self, reward):
+		return self.f(reward)
+
+
 def make_mujoco_env(cfg):
 	env_id = cfg.task
-	assert env_id in gym.envs.registry.keys()
 	env = gym.make(env_id)
-
+	env = TimeLimitWrapper(env)
+	env = RecordEpisodeStatistics(env)
+	env = ActRepeatWrapper(env, cfg.action_repeat)
+	# env = NormalizeReward(env)
+	# env = TransformReward(env, lambda r: r/5.0)
 	cfg.obs_shape = tuple(int(x) for x in env.observation_space.shape)
 	cfg.action_shape = tuple(int(x) for x in env.action_space.shape)
 	cfg.action_dim = env.action_space.shape[0]
 
 	return env
+
+
+def make_hms_env(cfg):
+	"""
+	Make Hands manipulation suite environment for TD-MPC experiments.
+	This simulation is powered by mujoco adapted from mj_envs
+	"""
+	env_id = cfg.task
+	env = GymEnv(env_id, act_repeat=cfg.action_repeat)
+	cfg.obs_shape = (env.spec.observation_dim, )
+	cfg.action_shape = (env.spec.action_dim, )
+	cfg.action_dim = env.spec.action_dim
+	return env
+
+
+# if __name__ == '__main__':
+# 	env = gym.make('Ant-v2')
+# 	env = TimeLimitWrapper(env)
+# 	env = RecordEpisodeStatistics(env)
+# 	env = ActRepeatWrapper(env, 2)
+# 	env = NormalizeReward(env)
+# 	env.reset()
+# 	normalized_cum_reward = 0
+# 	for t in range(10000):
+# 		# env.render()
+# 		o, r, d, info = env.step(env.action_space.sample())
+# 		normalized_cum_reward += r
+# 		if d:
+# 			print('episode_done', info["episode"]["r"], info["episode"]["l"], normalized_cum_reward)
+# 			env.reset()
+# 			d = False
+# 			normalized_cum_reward = 0
