@@ -89,20 +89,22 @@ class TDMPC():
             G += discount * reward
             discount *= self.cfg.discount
         G += discount * torch.min(*self.model.Q(z, self.model.pi(z, self.cfg.min_std)))
-        return G
+        return G.nan_to_num_(0), float(reward.mean().item())
 
     @torch.no_grad()
     def plan(self, obs, eval_mode=False, step=None, t0=True):
         """
-		Plan next action using TD-MPC inference.
-		obs: raw input observation.
-		eval_mode: uniform sampling and action noise is disabled during evaluation.
-		step: current time step. determines e.g. planning horizon.
-		t0: whether current step is the first step of an episode.
-		"""
+        Plan next action using TD-MPC inference.
+        obs: raw input observation.
+        eval_mode: uniform sampling and action noise is disabled during evaluation.
+        step: current time step. determines e.g. planning horizon.
+        t0: whether current step is the first step of an episode.
+        """
         # Seed steps
+        reward_mean = 0
+        plan_metrics = {'external_reward_mean': 0.0, 'current_std': 0.0}
         if step < self.cfg.seed_steps and not eval_mode:
-            return torch.empty(self.cfg.action_dim, dtype=torch.float32, device=self.device).uniform_(-1, 1)
+            return torch.empty(self.cfg.action_dim, dtype=torch.float32, device=self.device).uniform_(-1, 1), plan_metrics
 
         # Sample policy trajectories
         obs = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
@@ -132,7 +134,7 @@ class TDMPC():
                 actions = torch.cat([actions, pi_actions], dim=1)
 
             # Compute elite actions
-            value = self.estimate_value(z, actions, horizon).nan_to_num_(0)  # forward shoot plus q_value
+            value, reward_mean = self.estimate_value(z, actions, horizon)  # forward shoot plus q_value
             elite_idxs = torch.topk(value.squeeze(1), self.cfg.num_elites, dim=0).indices
             elite_value, elite_actions = value[elite_idxs], actions[:, elite_idxs]  # select action of high value
 
@@ -154,7 +156,11 @@ class TDMPC():
         a = mean
         if not eval_mode:
             a += std * torch.randn(self.cfg.action_dim, device=std.device)
-        return a
+
+        plan_metrics.update({'current_std': std.mean().item(),
+                             'external_reward_mean': reward_mean})
+
+        return a, plan_metrics
 
     def update_pi(self, zs):
         """Update policy using a sequence of latent states."""

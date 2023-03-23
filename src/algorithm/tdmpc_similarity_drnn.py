@@ -49,6 +49,7 @@ class DSSM(nn.Module):
             latent_feature, _ = self._encoder(obs)
             latents = restore_leading_dims(latent_feature, lead_dim, T, B)
         else:
+            # obs = h.symlog(obs)
             latents = self._encoder(obs)
         return latents
 
@@ -150,7 +151,7 @@ class TdMpcSimDssm:
             G += discount * reward
             discount *= self.cfg.discount
         G += discount * torch.min(*self.model.Q(z, self.model.pi(z, self.cfg.min_std)))
-        return G.nan_to_num_(0)
+        return G.nan_to_num_(0), float(reward.mean().item())
 
     @torch.no_grad()
     def plan2explore(self, z_expl, action_expl, hidden_expl):
@@ -187,12 +188,12 @@ class TdMpcSimDssm:
         log_intrinsic_reward = intrinsic_reward.squeeze()
         mask = log_intrinsic_reward != 0
         intrinsic_reward_mean = log_intrinsic_reward[mask].mean().nan_to_num_(0).item()
-        return G.nan_to_num_(0), G_expl, float(reward.mean().item())
+        return G.nan_to_num_(0), G_expl, float(intrinsic_reward_mean), float(reward.mean().item())
 
     @torch.no_grad()
     def plan(self, obs, hidden, eval_mode=False, step=None, t0=True):
-        intrinsic_reward_mean = 0
-        plan_metrics = {'intrinsic_reward_mean': 0.0, 'current_std': 0.0}
+        intrinsic_reward_mean, reward_mean = 0, 0
+        plan_metrics = {'intrinsic_reward_mean': 0.0, 'external_reward_mean': 0.0, 'current_std': 0.0}
 
         if step < self.cfg.seed_steps and not eval_mode:
             return torch.empty(self.cfg.action_dim, dtype=torch.float32, device=self.device).uniform_(-1, 1), None, plan_metrics
@@ -231,11 +232,11 @@ class TdMpcSimDssm:
 
             # Compute elite actions
             if self.cfg.plan2expl and not eval_mode and i < 6:
-                value, rewards_expl, intrinsic_reward_mean = self.plan2explore(z, actions, hidden_plan)
+                value, rewards_expl, intrinsic_reward_mean, reward_mean = self.plan2explore(z, actions, hidden_plan)
                 value += rewards_expl
                 elite_idxs = torch.topk(value.squeeze(1), self.cfg.num_elites, dim=0).indices
             else:
-                value = self.estimate_value(z, actions, hidden_plan)
+                value, reward_mean = self.estimate_value(z, actions, hidden_plan)
                 elite_idxs = torch.topk(value.squeeze(1), self.cfg.num_elites, dim=0).indices
 
             elite_value, elite_actions = value[elite_idxs], actions[:, elite_idxs]  # select action of high value
@@ -266,6 +267,7 @@ class TdMpcSimDssm:
         #     actor_diverse = np.linalg.norm(a, pi_action)
 
         plan_metrics.update({'intrinsic_reward_mean': intrinsic_reward_mean,
+                             'external_reward_mean': reward_mean,
                              'current_std': std.mean().item()})
 
         return a, hidden, plan_metrics
@@ -296,18 +298,19 @@ class TdMpcSimDssm:
         """
         self.pi_optim.zero_grad(set_to_none=True)
         self.model.track_model_grad(False)
-
-        hidden = self.model.init_hidden_state(z.shape[0], z.device)
         reward_sum, discount = 0, 1
         pi_loss = 0
-        for t in range(self.plan_horizon):
+        horizon = np.clip(self.plan_horizon, 1, 3)
+        hidden = self.model.init_hidden_state(z.shape[0], z.device)
+        for t in range(horizon):
+            rho = 0.5 ** t
             z, hidden, reward_pred = self.model.next(z, a, hidden)
             a = self.model.pi(z, self.cfg.min_std)
-            q_estimate = torch.min(*self.model_target.Q(z.detach(), a))
-            reward_sum += reward_pred.detach() * discount
+            q_estimate = torch.min(*self.model_target.Q(z, a))
+            reward_sum += reward_pred * discount
             discount *= self.cfg.discount
-            pi_loss += -(reward_sum + discount * q_estimate).mean()
-        pi_loss /= self.plan_horizon
+            pi_loss += -rho * (reward_sum + discount * q_estimate).mean()
+        pi_loss /= horizon
 
         pi_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model._pi.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
@@ -401,7 +404,6 @@ class TdMpcSimDssm:
         intrinsic_reward = torch.from_numpy(intrinsic_reward).cuda()
         return intrinsic_reward.detach_()
 
-
     def update(self, replay_buffer, step):
         """Main update function. Corresponds to one iteration of the TOLD model learning."""
         # obs [batch, state_dim], actions [horizon+1, batch, act_dim]
@@ -443,7 +445,7 @@ class TdMpcSimDssm:
             z, hidden, reward_pred = self.model.next(z, action[t], hidden)
             with torch.no_grad():
                 td_target = self._td_target(online_next_zs[t], reward[t])
-            reward_loss_shooting += h.mse(reward_pred, reward[t])
+            reward_loss_shooting += h.mse(50*reward_pred, 50*reward[t])
             value_loss += (h.mse(Q1, td_target) + h.mse(Q2, td_target)) * rho
             priority_loss += (h.l1(Q1, td_target) + h.l1(Q2, td_target)) * rho
 
@@ -461,7 +463,7 @@ class TdMpcSimDssm:
                 shoot_z, shoot_hidden, reward_pred = self.model.next(shoot_z, action[j], shoot_hidden)
                 zs_query.append(shoot_z)
                 zs_key.append(next_zs[j].detach())
-                reward_loss_shooting += h.mse(reward_pred, reward[j])
+                reward_loss_shooting += h.mse(50*reward_pred, 50*reward[j])
             reward_loss += reward_loss_shooting / (shoot_count+1)
             similarity_loss += self.similarity_loss(zs_query, zs_key).reshape(self.cfg.horizon-t, self.cfg.batch_size, -1).sum(dim=0)  # (batch_size, )
             # consistency_loss += self.consistency_loss(zs_query, zs_key)

@@ -16,6 +16,7 @@ from cfg import parse_cfg
 from tdmpc.envs.env import make_env
 from tdmpc.envs.quad_envs import make_quadrotor_env_multi
 from algorithm.tdmpc_similarity import TDMPCSIM
+from algorithm.tdmpc_similarity_drnn import TdMpcSimDssm
 from algorithm.helper import Episode, RolloutBuffer
 from gym_art.quadrotor_single.quad_utils import *
 import logger
@@ -94,7 +95,7 @@ def train(cfg):
         obs = env.reset()
         episode = Episode(cfg, obs)
         while not episode.done:
-            action = agent.plan(obs, step=ctrl_step, t0=episode.first)
+            action, _, _ = agent.plan(obs, step=ctrl_step, t0=episode.first)
             obs, reward, done, _ = env.step(action.cpu().numpy())
             episode += (obs, action, reward, done)
             ctrl_step += 1
@@ -141,7 +142,7 @@ def test_gym_art_multi_agent(cfg):
     assert torch.cuda.is_available()
     set_seed(cfg.seed)
     work_dir = Path().cwd() / __LOGS__ / cfg.task / cfg.modality / cfg.exp_name / str(cfg.seed)
-    env, agent, buffer = make_quadrotor_env_multi(cfg), TDMPCSIM(cfg), RolloutBuffer(cfg)
+    env, agent, buffer = make_quadrotor_env_multi(cfg), TdMpcSimDssm(cfg), RolloutBuffer(cfg)
     # load the model for test
     fp = os.path.join(work_dir, cfg.model_path)
     agent.load(fp)
@@ -171,7 +172,8 @@ def test_gym_art_multi_agent(cfg):
                 action = action.squeeze().detach()
             else:
                 # online planing policy
-                action = agent.plan(s, eval_mode=True, step=0, t0=step_count == 0)
+                hidden = agent.model.init_hidden_state(batch_size=1, device='cuda')
+                action, _, _ = agent.plan(s, hidden, eval_mode=True, step=0, t0=step_count == 0)
 
             s, reward, done, info = env.step(action.cpu().numpy())
             dist_to_goal = np.linalg.norm(env.envs[0].dynamics.pos - env.envs[0].goal)

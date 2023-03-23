@@ -40,7 +40,7 @@ def evaluate(env, agent, num_episodes, step, env_step, video):
 		if video:
 			video.init(env, enabled=(i == 0))
 		while not done:
-			action = agent.plan(obs, eval_mode=True, step=step, t0=t == 0)
+			action, _ = agent.plan(obs, eval_mode=True, step=step, t0=t == 0)
 			obs, reward, done, _ = env.step(action.cpu().numpy())
 			ep_reward += reward
 			if video:
@@ -77,7 +77,7 @@ def train(cfg):
 	assert torch.cuda.is_available()
 	set_seed(cfg.seed)
 	work_dir = Path().cwd() / __LOGS__ / cfg.task / cfg.modality / cfg.exp_name / str(cfg.seed)
-	env, agent, buffer = make_mujoco_env(cfg), TDMPC(cfg), ReplayBuffer(cfg, latent_plan=True)
+	env, agent, buffer = make_env(cfg), TDMPC(cfg), ReplayBuffer(cfg, latent_plan=True)
 	# env, agent, buffer = make_quadrotor_env_single(cfg), TDMPCSIM(cfg), ReplayBuffer(cfg, latent_plan=True)
 	# env, agent, buffer = make_mujoco_env(cfg), TDMPCSIM(cfg), ReplayBuffer(cfg, latent_plan=True)
 	
@@ -89,10 +89,14 @@ def train(cfg):
 		# Collect trajectory
 		obs = env.reset()
 		episode = Episode(cfg, obs)
+		external_reward_mean_list = []
+		current_std_mean_list = []
 		while not episode.done:
-			action = agent.plan(obs, step=step, t0=episode.first)
+			action, plan_metrics = agent.plan(obs, step=step, t0=episode.first)
 			obs, reward, done, _ = env.step(action.cpu().numpy())
 			episode += (obs, action, reward, done)
+			external_reward_mean_list.append(plan_metrics['external_reward_mean'])
+			current_std_mean_list.append(plan_metrics['current_std'])
 		assert len(episode) == cfg.episode_length
 		buffer += episode
 
@@ -111,7 +115,9 @@ def train(cfg):
 			'step': step,
 			'env_step': env_step,
 			'total_time': time.time() - start_time,
-			'episode_reward': episode.cumulative_reward}
+			'episode_reward': episode.cumulative_reward,
+			'external_reward_mean': np.mean(external_reward_mean_list),
+			'current_std': np.mean(current_std_mean_list), }
 		train_metrics.update(common_metrics)
 		L.log(train_metrics, category='train')
 

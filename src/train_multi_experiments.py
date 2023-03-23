@@ -1,8 +1,11 @@
+import ray
+from ray import tune, air
+from ray.air import session
 import warnings
-import datetime
+import pathlib
 warnings.filterwarnings('ignore')
 import os
-
+from cfg import parse_cfg
 os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
 os.environ['MUJOCO_GL'] = 'egl'
 import torch
@@ -12,15 +15,14 @@ import gym
 gym.logger.set_level(40)
 import time
 import random
-from pathlib import Path
-from cfg import parse_cfg
-from envs.env import make_env, make_hms_env, make_mujoco_env
-from algorithm.tdmpc_similarity_drnn import TdMpcSimDssm
+from envs.env import make_env
+from algorithm.tdmpc_icem_similarity_drnn import TdICemSimDssm
 from algorithm.helper import Episode, ReplayBuffer
 import logger
 
 torch.backends.cudnn.benchmark = True
 __CONFIG__, __LOGS__ = 'cfgs', 'logs'
+PARENT_PATH = pathlib.Path(__file__).parent.parent.absolute()
 
 
 def set_seed(seed):
@@ -72,16 +74,17 @@ def evaluate_pi(env, agent, num_episodes, step, env_step, video):
     return np.nanmean(episode_rewards)
 
 
-def train(cfg):
+def train(config):
     """Training script for TD-MPC. Requires a CUDA-enabled device."""
     assert torch.cuda.is_available()
-    set_seed(cfg.seed)
-    work_dir = Path().cwd() / __LOGS__ / cfg.task / cfg.modality / cfg.exp_name / str(cfg.seed)
-    # env, agent, buffer = make_env(cfg), TDMPC(cfg), ReplayBuffer(cfg, latent_plan=True)
-    # env, agent, buffer = make_env(cfg), TDMPCSIM(cfg), ReplayBuffer(cfg, latent_plan=True)
-    env, agent, buffer = make_env(cfg), TdMpcSimDssm(cfg), ReplayBuffer(cfg, latent_plan=True)
+    cfg = parse_cfg(PARENT_PATH / __CONFIG__)
+    cfg.horizon = config['horizon']
+    set_seed(config['seed'])
+    work_dir = PARENT_PATH / __LOGS__ / cfg.task / cfg.modality / cfg.exp_name / str(cfg.seed)
+    env, agent, buffer = make_env(cfg), TdICemSimDssm(cfg), ReplayBuffer(cfg, latent_plan=True)
 
     # Run training
+    cfg.wandb_exp_name = cfg.wandb_exp_name + '_' + str(cfg.noise_beta)
     L = logger.Logger(work_dir, cfg)
     episode_idx, start_time = 0, time.time()
     for step in range(0, cfg.train_steps + cfg.episode_length, cfg.episode_length):
@@ -91,7 +94,6 @@ def train(cfg):
         episode = Episode(cfg, obs)
         hidden = None
         total_train_step = step
-        intrinsic_reward_mean_list = []
         external_reward_mean_list = []
         current_std_mean_list = []
         while not episode.done:
@@ -99,7 +101,6 @@ def train(cfg):
             if episode.first or total_train_step % 1 == 0:
                 hidden = agent.model.init_hidden_state(batch_size=1, device='cuda')
             action, hidden, plan_metrics = agent.plan(obs, hidden, step=step, t0=episode.first)
-            intrinsic_reward_mean_list.append(plan_metrics['intrinsic_reward_mean'])
             external_reward_mean_list.append(plan_metrics['external_reward_mean'])
             current_std_mean_list.append(plan_metrics['current_std'])
             obs, reward, done, _ = env.step(action.cpu().numpy())
@@ -124,7 +125,6 @@ def train(cfg):
             'env_step': env_step,
             'total_time': time.time() - start_time,
             'episode_reward': episode.cumulative_reward,
-            'intrinsic_reward_mean': np.mean(intrinsic_reward_mean_list),
             'external_reward_mean': np.mean(external_reward_mean_list),
             'current_std': np.mean(current_std_mean_list), }
         train_metrics.update(common_metrics)
@@ -135,10 +135,40 @@ def train(cfg):
             common_metrics['episode_reward'] = evaluate(env, agent, cfg.eval_episodes, step, env_step, L.video)
             common_metrics['episode_reward_pi'] = evaluate_pi(env, agent, cfg.eval_episodes, step, env_step, L.video)
             L.log(common_metrics, category='eval')
+            session.report({'episode_reward': common_metrics['episode_reward']})
 
     L.finish(agent)
     print('Training completed successfully')
 
 
+def main(num_samples=1, gpus_per_trail=0.3):
+    object_store_memory = 24 * 1024 * 1024 * 1024
+    ray.init(object_store_memory=object_store_memory)
+    search_space = {
+        'horizon': tune.grid_search([7, 8, 9]),
+        'seed': tune.randint(200, 2000),
+    }
+    tuner = tune.Tuner(
+        tune.with_resources(tune.with_parameters(train),
+                            resources={'cpu': 4, 'gpu': gpus_per_trail}),
+        tune_config=tune.TuneConfig(
+            metric='episode_reward',
+            mode='max',
+            num_samples=num_samples,
+        ),
+        run_config=air.RunConfig(stop={'training_iteration': 27, 'episode_reward': 900}),
+        param_space=search_space,
+    )
+    try:
+        results = tuner.fit()
+        best_result = results.get_best_result('episode_reward', 'max')
+        print('Best result: {}'.format(best_result))
+    except KeyboardInterrupt:
+        print('Keyboard interrupt received, exiting.')
+        tuner.stop()
+    finally:
+        ray.shutdown()
+
+
 if __name__ == '__main__':
-    train(parse_cfg(Path().cwd() / __CONFIG__))
+    main()

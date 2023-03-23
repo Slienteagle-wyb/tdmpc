@@ -57,7 +57,7 @@ def set_requires_grad(net, value):
 
 def symlog(x):
     """Symmetric log function."""
-    return torch.sign(x) * torch.log(1 + torch.abs(x))
+    return torch.sign(x) * (2.0 * torch.log(1 + torch.abs(x)))
 
 
 def symexp(x):

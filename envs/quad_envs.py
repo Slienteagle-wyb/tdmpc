@@ -1,10 +1,10 @@
 import gym
 import numpy as np
+from gym.wrappers import RecordEpisodeStatistics
 from swarm_rl.env_wrappers.reward_shaping import DEFAULT_QUAD_REWARD_SHAPING_SINGLE, DEFAULT_QUAD_REWARD_SHAPING
 from gym_art.quadrotor_single.quadrotor import QuadrotorEnv
 from gym_art.quadrotor_multi.quadrotor_multi import QuadrotorEnvMulti
 from gym_art.quadrotor_multi.quadrotor_racing import QuadrotorEnvRacing
-import gym_pybullet_drones
 
 
 def make_quadrotor_env_single(cfg):
@@ -53,7 +53,7 @@ def make_quadrotor_env_multi(cfgs):
     extended_obs = cfg.neighbor_obs_type
     use_replay_buffer = cfg.replay_buffer_sample_prob > 0.0
 
-    env = QuadrotorEnvRacing(
+    env = QuadrotorEnvMulti(
         num_agents=cfg.quads_num_agents,
         dynamics_params=cfg.quad_type, raw_control=cfg.raw_control, raw_control_zero_middle=cfg.raw_control_zero_middle,
         dynamics_randomize_every=cfg.dyn_randomize_every, dynamics_change=dynamics_change, dyn_sampler_1=sampler_1,
@@ -101,17 +101,17 @@ class QuadObsWrapper(gym.Wrapper):
         self._env = env
 
     def _modify_obs(self, obs):
-        clipped_relative_pos = np.clip(obs[0:3], -1.5 * self._env.box, 1.5 * self._env.box)
-        # clipped_vxyz = np.clip(obs[3:6], -self._env.dynamics.vxyz_max, self._env.dynamics.vxyz_max)
-        # clipped_w = np.clip(obs[15:18], -self._env.dynamics.omega_max, self._env.dynamics.omega_max)
-        normalized_relative_pos = clipped_relative_pos / (1.5 * self._env.box)
-        # normalized_vxyz = clipped_vxyz / self._env.dynamics.vxyz_max
-        # normalized_w = clipped_w / (0.25 * self._env.dynamics.omega_max)
+        clipped_relative_pos = np.clip(obs[0:3], -2.0 * self._env.box, 2.0 * self._env.box)  # box hw is 2.0
+        normalized_relative_pos = clipped_relative_pos / (2.0 * self._env.box)
         obs[0:3] = normalized_relative_pos
-        # obs[3:6] = normalized_vxyz
-        # obs[15:18] = clipped_w
         vxyz = np.clip(obs[3:6], -self._env.dynamics.vxyz_max, self._env.dynamics.vxyz_max)
         obs[3:6] = vxyz
+        # clipped_vxyz = np.clip(obs[3:6], -self._env.dynamics.vxyz_max, self._env.dynamics.vxyz_max)
+        # clipped_w = np.clip(obs[15:18], -self._env.dynamics.omega_max, self._env.dynamics.omega_max)
+        # normalized_vxyz = clipped_vxyz / self._env.dynamics.vxyz_max
+        # normalized_w = clipped_w / (0.25 * self._env.dynamics.omega_max)
+        # obs[3:6] = normalized_vxyz
+        # obs[15:18] = clipped_w
         return obs
 
     def resset(self):
@@ -150,7 +150,7 @@ class ActRepeatWrapper(gym.Wrapper):
 
 
 class CompatibilityWrapper(gym.Wrapper):
-    def __init__(self, env: QuadrotorEnvMulti):
+    def __init__(self, env):
         super(CompatibilityWrapper, self).__init__(env)
         self._env = env
 

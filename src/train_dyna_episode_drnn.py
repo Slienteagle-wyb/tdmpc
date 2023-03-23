@@ -14,11 +14,10 @@ import time
 import random
 from pathlib import Path
 from cfg import parse_cfg
-from envs.env import make_env, make_hms_env, make_mujoco_env
-from envs.quad_envs import make_quadrotor_env_single, make_pybullet_drone_env
+from envs.env import make_hms_env, make_mujoco_env
+from envs.quad_envs import make_quadrotor_env_single
 from algorithm.tdmpc_similarity_drnn import TdMpcSimDssm
-from algorithm.tdmpc_similarity import TDMPCSIM
-from algorithm.helper import Episode, ReplayBuffer, RolloutBuffer
+from algorithm.helper import Episode, RolloutBuffer
 # from gym_art.quadrotor_single.quad_utils import *
 import logger
 
@@ -50,8 +49,8 @@ def evaluate(env, agent, num_episodes, step, env_step, video):
             if video:
                 video.record(env)
             t += 1
-        episode_rewards.append(info["episode"]["r"])
-        episode_length.append(info["episode"]["l"])
+        episode_rewards.append(ep_reward)
+        episode_length.append(t)
         if video:
             video.save(env_step)
     return {'episode_reward': np.nanmean(episode_rewards),
@@ -73,7 +72,7 @@ def evaluate_pi(env, agent, num_episodes, step, env_step, video):
             if video:
                 video.record(env)
             t += 1
-        episode_rewards.append(info["episode"]["r"])
+        episode_rewards.append(ep_reward)
         if video:
             video.save(env_step)
     return np.nanmean(episode_rewards)
@@ -126,10 +125,8 @@ def train(cfg):
             'step': ctrl_step,
             'env_step': env_step,
             'total_time': time.time() - start_time,
-            'episode_reward': info["episode"]["r"],
-            'episode_length': info["episode"]["l"],
-            'intrinsic_reward_mean': np.mean(intrinsic_reward_mean_list),
-            'current_std': np.mean(current_std_mean_list), }
+            'episode_reward': episode.cumulative_reward,
+            'episode_length': len(episode)}
         train_metrics.update(common_metrics)
         L.log(train_metrics, category='train')
 
@@ -140,8 +137,8 @@ def train(cfg):
             L.log(common_metrics, category='eval')
 
         # save model every save epoch interval
-        # if episode_idx % int(cfg.save_interval) == 0 and episode_idx >= 500:
-        #     L.save_model(agent, episode_idx)
+        if episode_idx % int(cfg.save_interval) == 0 and episode_idx >= 600:
+            L.save_model(agent, episode_idx)
 
     L.finish(agent)
     print('Training completed successfully')

@@ -1,5 +1,4 @@
 import warnings
-import datetime
 warnings.filterwarnings('ignore')
 import os
 
@@ -14,8 +13,8 @@ import time
 import random
 from pathlib import Path
 from cfg import parse_cfg
-from envs.env import make_env, make_hms_env, make_mujoco_env
-from algorithm.tdmpc_similarity_drnn import TdMpcSimDssm
+from envs.env import make_env
+from algorithm.tdmpc_icem_similarity_drnn import TdICemSimDssm
 from algorithm.helper import Episode, ReplayBuffer
 import logger
 
@@ -77,9 +76,7 @@ def train(cfg):
     assert torch.cuda.is_available()
     set_seed(cfg.seed)
     work_dir = Path().cwd() / __LOGS__ / cfg.task / cfg.modality / cfg.exp_name / str(cfg.seed)
-    # env, agent, buffer = make_env(cfg), TDMPC(cfg), ReplayBuffer(cfg, latent_plan=True)
-    # env, agent, buffer = make_env(cfg), TDMPCSIM(cfg), ReplayBuffer(cfg, latent_plan=True)
-    env, agent, buffer = make_env(cfg), TdMpcSimDssm(cfg), ReplayBuffer(cfg, latent_plan=True)
+    env, agent, buffer = make_env(cfg), TdICemSimDssm(cfg), ReplayBuffer(cfg, latent_plan=True)
 
     # Run training
     L = logger.Logger(work_dir, cfg)
@@ -91,7 +88,6 @@ def train(cfg):
         episode = Episode(cfg, obs)
         hidden = None
         total_train_step = step
-        intrinsic_reward_mean_list = []
         external_reward_mean_list = []
         current_std_mean_list = []
         while not episode.done:
@@ -99,7 +95,6 @@ def train(cfg):
             if episode.first or total_train_step % 1 == 0:
                 hidden = agent.model.init_hidden_state(batch_size=1, device='cuda')
             action, hidden, plan_metrics = agent.plan(obs, hidden, step=step, t0=episode.first)
-            intrinsic_reward_mean_list.append(plan_metrics['intrinsic_reward_mean'])
             external_reward_mean_list.append(plan_metrics['external_reward_mean'])
             current_std_mean_list.append(plan_metrics['current_std'])
             obs, reward, done, _ = env.step(action.cpu().numpy())
@@ -124,7 +119,6 @@ def train(cfg):
             'env_step': env_step,
             'total_time': time.time() - start_time,
             'episode_reward': episode.cumulative_reward,
-            'intrinsic_reward_mean': np.mean(intrinsic_reward_mean_list),
             'external_reward_mean': np.mean(external_reward_mean_list),
             'current_std': np.mean(current_std_mean_list), }
         train_metrics.update(common_metrics)
