@@ -1,28 +1,30 @@
+import ray
+from ray import tune, air
+from ray.air import session
 import warnings
+import pathlib
 import matplotlib.pyplot as plt
 import tqdm
 warnings.filterwarnings('ignore')
 import os
 os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
-# os.environ['MUJOCO_GL'] = 'egl'
 import torch
-import numpy as np
 import gym
+import time
 
 gym.logger.set_level(40)
-import time
 import random
 from pathlib import Path
 from cfg import parse_cfg
-from envs.env import make_hms_env, make_mujoco_env
-from envs.quad_envs import make_quadrotor_env_single
-from algorithm.tdmpc_similarity_drnn import TdMpcSimDssm
+from envs.quad_envs import make_quadrotor_env_racing
+from algorithm.tdsim_drnn_racing import TdMpcSimDssmR
 from algorithm.helper import Episode, RolloutBuffer
 from gym_art.quadrotor_single.quad_utils import *
 import logger
 
 torch.backends.cudnn.benchmark = True
 __CONFIG__, __LOGS__ = 'cfgs', 'logs'
+PARENT_PATH = pathlib.Path(__file__).parent.parent.absolute()
 
 
 def set_seed(seed):
@@ -57,7 +59,7 @@ def evaluate(env, agent, num_episodes, step, env_step, video):
             'episode_length': int(np.nanmean(episode_length))}
 
 
-def evaluate_pi(env, agent, num_episodes, step, env_step, video):
+def evaluate_pi(env, agent, num_episodes, cfg, env_step, video):
     """Evaluate a trained agent and optionally save a video."""
     episode_rewards = []
     for i in range(num_episodes):
@@ -66,7 +68,8 @@ def evaluate_pi(env, agent, num_episodes, step, env_step, video):
             video.init(env, enabled=(i == 0))
         while not done:
             obs = torch.tensor(obs, dtype=torch.float32, device='cuda').unsqueeze(0)
-            action = agent.model.pi(agent.model.h(obs))
+            z = agent.model.h(obs)
+            action = agent.model.pi(z)
             obs, reward, done, info = env.step(action.squeeze().detach().cpu().numpy())
             ep_reward += reward
             if video:
@@ -78,14 +81,18 @@ def evaluate_pi(env, agent, num_episodes, step, env_step, video):
     return np.nanmean(episode_rewards)
 
 
-def train(cfg):
+def train(config):
     """Training script for TD-MPC. Requires a CUDA-enabled device."""
     assert torch.cuda.is_available()
-    set_seed(cfg.seed)
+    cfg = parse_cfg(PARENT_PATH / __CONFIG__)
+    set_seed(config['seed'])
+    cfg.seed = config['seed']
+    cfg.progress_coef = config['progress_coef']
+    cfg.safety_coef = config['safety_coef']
+    cfg.wandb_exp_name = cfg.wandb_exp_name + '_' + str(cfg.progress_coef) + '_' + str(cfg.safety_coef)
     work_dir = Path().cwd() / __LOGS__ / cfg.task / cfg.modality / cfg.exp_name / str(cfg.seed)
-    env, agent, buffer = make_quadrotor_env_single(cfg), TdMpcSimDssm(cfg), RolloutBuffer(cfg)
-    # env, agent, buffer = make_mujoco_env(cfg), TdMpcSimDssm(cfg), RolloutBuffer(cfg)
-
+    env = make_quadrotor_env_racing(cfg)
+    agent, buffer = TdMpcSimDssmR(cfg), RolloutBuffer(cfg)
     # Run training
     L = logger.Logger(work_dir, cfg)
     episode_idx, start_time = 0, time.time()
@@ -95,13 +102,13 @@ def train(cfg):
         obs = env.reset()
         episode = Episode(cfg, obs)
         hidden = None
-        intrinsic_reward_mean_list = []
+        external_reward_mean_list = []
         current_std_mean_list = []
         while not episode.done:
             if episode.first or iters % 1 == 0:
                 hidden = agent.model.init_hidden_state(batch_size=1, device='cuda')
             action, hidden, plan_metrics = agent.plan(obs, hidden, step=ctrl_step, t0=episode.first)
-            intrinsic_reward_mean_list.append(plan_metrics['intrinsic_reward_mean'])
+            external_reward_mean_list.append(plan_metrics['external_reward_mean'])
             current_std_mean_list.append(plan_metrics['current_std'])
             obs, reward, done, info = env.step(action.cpu().numpy())
             episode += (obs, action, reward, done)
@@ -126,15 +133,19 @@ def train(cfg):
             'env_step': env_step,
             'total_time': time.time() - start_time,
             'episode_reward': episode.cumulative_reward,
-            'episode_length': len(episode)}
+            'episode_length': len(episode),
+            'external_reward_mean': np.mean(external_reward_mean_list),
+            'current_std': np.mean(current_std_mean_list),
+        }
         train_metrics.update(common_metrics)
         L.log(train_metrics, category='train')
 
         # Evaluate agent periodically
         if (episode_idx-1) % cfg.eval_freq_episodes == 0:
             common_metrics.update(evaluate(env, agent, cfg.eval_episodes, iters, env_step, L.video))
-            common_metrics['episode_reward_pi'] = evaluate_pi(env, agent, cfg.eval_episodes, iters, env_step, L.video)
+            common_metrics['episode_reward_pi'] = evaluate_pi(env, agent, cfg.eval_episodes, cfg, env_step, L.video)
             L.log(common_metrics, category='eval')
+            session.report({'episode_reward': common_metrics['episode_reward']})
 
         # save model every save epoch interval
         if episode_idx % int(cfg.save_interval) == 0 and episode_idx >= 600:
@@ -144,11 +155,40 @@ def train(cfg):
     print('Training completed successfully')
 
 
+def main(num_samples=1, gpus_per_trail=0.25):
+    object_store_memory = 24 * 1024 * 1024 * 1024
+    ray.init(object_store_memory=object_store_memory)
+    search_space = {
+        'progress_coef': tune.grid_search([200.0, ]),
+        'safety_coef': tune.grid_search([2.5, 5.0, 10.0]),
+        'seed': tune.randint(10, 2000),
+    }
+    tuner = tune.Tuner(
+        tune.with_resources(tune.with_parameters(train),
+                            resources={'cpu': 4, 'gpu': gpus_per_trail}),
+        tune_config=tune.TuneConfig(
+            metric='episode_reward',
+            mode='max',
+            num_samples=num_samples,
+        ),
+        run_config=air.RunConfig(stop={'training_iteration': 500, 'episode_reward': 3000}),
+        param_space=search_space,
+    )
+    try:
+        results = tuner.fit()
+        best_result = results.get_best_result('episode_reward', 'max')
+        print('Best result: {}'.format(best_result))
+    except KeyboardInterrupt:
+        print('Keyboard interrupt received, exiting.')
+    finally:
+        ray.shutdown()
+
+
 def test_gym_art(cfg):
     assert torch.cuda.is_available()
     set_seed(cfg.seed)
     work_dir = Path().cwd() / __LOGS__ / cfg.task / cfg.modality / cfg.exp_name / str(cfg.seed)
-    env, agent, buffer = make_quadrotor_env_single(cfg), TdMpcSimDssm(cfg), RolloutBuffer(cfg)
+    env, agent, buffer = make_quadrotor_env_racing(cfg), TdMpcSimDssmR(cfg), RolloutBuffer(cfg)
     # load the model for test
     fp = os.path.join(work_dir, cfg.model_path)
     agent.load(fp)
@@ -176,7 +216,7 @@ def test_gym_art(cfg):
             s, reward, done, info = env.step(action.cpu().numpy())
             r_sum += reward
             actions.append((action.cpu().numpy() + np.ones(4)) * 0.5)
-            thrusts.append(env.dynamics.thrust_cmds_damp)
+            thrusts.append(env.env.dynamics.thrust_cmds_damp)
             observations.append(s)
             # record the relative pos to target and attitude represented by quaternion
             quat = R2quat(rot=s[6:15])
@@ -216,5 +256,6 @@ def test_gym_art(cfg):
 
 
 if __name__ == '__main__':
+    main()
     # train(parse_cfg(Path().cwd() / __CONFIG__))
-    test_gym_art(parse_cfg(Path().cwd() / __CONFIG__))
+    # test_gym_art(parse_cfg(Path().cwd() / __CONFIG__))

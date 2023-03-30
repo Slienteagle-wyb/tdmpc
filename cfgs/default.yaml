@@ -1,5 +1,5 @@
 # environment
-task: finger-turn-hard
+task: racing-single
 modality: 'state'
 action_repeat: ???
 discount: 0.99
@@ -8,8 +8,8 @@ train_steps: 500000/${action_repeat}
 
 # planning
 iterations: 6
-num_samples: 256
-num_elites: 32
+num_samples: 512
+num_elites: 64
 mixture_coef: 0.5  # 0.05
 min_std: 0.05
 temperature: 0.5
@@ -20,12 +20,12 @@ factor_decrease_num: 1.25
 shift_elites_over_time: true
 fraction_elites_reused: 0.25
 keep_previous_elites: true
-noise_beta: 2.5
+noise_beta: 0.5
 
 # learning
 batch_size: 512
 max_buffer_size: 1000000
-horizon: 6
+horizon: 5
 similarity_horizon: 1
 reward_coef: 0.5  # 0.2 for mujoco, 0.5 for dm_control
 value_coef: 0.1  # 0.1 default
@@ -35,7 +35,7 @@ intrinsic_reward_coef: 0.5  # 0.002 for quad, 0.5 for dm_control
 rho: 1.0
 kappa: 0.1
 std_schedule: linear(0.5, ${min_std}, 25000, 0)  # duration 25000 train step
-horizon_schedule: linear(2, ${horizon}, 25000, 0)
+horizon_schedule: linear(1, ${horizon}, 25000, 0)
 explore_schedule: linear(0, ${intrinsic_reward_coef}, 25000, 5000)
 regularization_schedule: linear(0.05, ${mixture_coef}, 1, 5000)
 demo_schedule: linear(0.95, 0.25, 48000, 32000)
@@ -65,7 +65,7 @@ norm_cell: true
 use_wandb: true
 wandb_project: MoPAC
 wandb_entity: Slientea98
-wandb_exp_name: 0323_finger_turn_hard_similarity_rho1.0_r0.5_v0.1_s0.2_icem_256/32/0.25_horizon6_color_noise
+wandb_exp_name: 0330_quad_racing_similarity_rho1.0_r0.5_v0.1_s0.2_horizon5_gates6_viz0_500k_z_score_norm_dist_progress_threshold0.96_ps_
 
 # mis
 seed: 0

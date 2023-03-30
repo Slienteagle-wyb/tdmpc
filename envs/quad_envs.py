@@ -1,6 +1,6 @@
 import gym
+import pickle
 import numpy as np
-from gym.wrappers import RecordEpisodeStatistics
 from swarm_rl.env_wrappers.reward_shaping import DEFAULT_QUAD_REWARD_SHAPING_SINGLE, DEFAULT_QUAD_REWARD_SHAPING
 from gym_art.quadrotor_single.quadrotor import QuadrotorEnv
 from gym_art.quadrotor_multi.quadrotor_multi import QuadrotorEnvMulti
@@ -57,14 +57,19 @@ def make_quadrotor_env_multi(cfgs):
         num_agents=cfg.quads_num_agents,
         dynamics_params=cfg.quad_type, raw_control=cfg.raw_control, raw_control_zero_middle=cfg.raw_control_zero_middle,
         dynamics_randomize_every=cfg.dyn_randomize_every, dynamics_change=dynamics_change, dyn_sampler_1=sampler_1,
-        sense_noise=cfg.sense_noise, init_random_state=cfg.init_random_state, ep_time=cfg.episode_duration, room_length=room_dims[0],
+        sense_noise=cfg.sense_noise, init_random_state=cfg.init_random_state, ep_time=cfg.episode_duration,
+        room_length=room_dims[0],
         room_width=room_dims[1], room_height=room_dims[2], rew_coeff=rew_coeff,
         quads_mode=cfg.quads_mode, quads_formation=cfg.quads_formation, quads_formation_size=cfg.quads_formation_size,
-        swarm_obs=extended_obs, quads_use_numba=cfg.quads_use_numba, quads_settle=cfg.quads_settle, quads_settle_range_meters=cfg.quads_settle_range_meters,
+        swarm_obs=extended_obs, quads_use_numba=cfg.quads_use_numba, quads_settle=cfg.quads_settle,
+        quads_settle_range_meters=cfg.quads_settle_range_meters,
         quads_vel_reward_out_range=cfg.quads_vel_reward_out_range, quads_obstacle_mode=cfg.quads_obstacle_mode,
-        quads_view_mode=cfg.quads_view_mode, quads_obstacle_num=cfg.quads_obstacle_num, quads_obstacle_type=cfg.quads_obstacle_type, quads_obstacle_size=cfg.quads_obstacle_size,
-        adaptive_env=cfg.quads_adaptive_env, obstacle_traj=cfg.quads_obstacle_traj, local_obs=cfg.quads_local_obs, obs_repr=cfg.quads_obs_repr,
-        collision_hitbox_radius=cfg.quads_collision_hitbox_radius, collision_falloff_radius=cfg.quads_collision_falloff_radius,
+        quads_view_mode=cfg.quads_view_mode, quads_obstacle_num=cfg.quads_obstacle_num,
+        quads_obstacle_type=cfg.quads_obstacle_type, quads_obstacle_size=cfg.quads_obstacle_size,
+        adaptive_env=cfg.quads_adaptive_env, obstacle_traj=cfg.quads_obstacle_traj, local_obs=cfg.quads_local_obs,
+        obs_repr=cfg.quads_obs_repr,
+        collision_hitbox_radius=cfg.quads_collision_hitbox_radius,
+        collision_falloff_radius=cfg.quads_collision_falloff_radius,
         local_metric=cfg.quads_local_metric, controller_type=cfg.controller_type,
         local_coeff=cfg.quads_local_coeff,  # how much velocity matters in "distance" calculation
         use_replay_buffer=use_replay_buffer, obstacle_obs_mode=cfg.quads_obstacle_obs_mode,
@@ -81,6 +86,71 @@ def make_quadrotor_env_multi(cfgs):
     return env
 
 
+def make_quadrotor_env_racing(cfgs):
+    sampler_1 = None
+    cfg = cfgs.env
+    dyn_randomization_ratio = cfg.dynamics_randomization_ratio
+    room_dims = (400, 400, 20)
+    if cfg.dynamics_randomization_ratio is not None:
+        sampler_1 = dict(type='RelativeSampler', noise_ratio=dyn_randomization_ratio, sampler='normal')
+
+    # dynamics_change = dict(noise=dict(thrust_noise_ratio=0.05), damp=dict(vel=0, omega_quadratic=0))
+    dynamics_change = None
+
+    rew_coeff = DEFAULT_QUAD_REWARD_SHAPING['quad_rewards']
+    rew_coeff.update(dict(progress=cfgs.progress_coef,
+                          safety=cfgs.safety_coef, pos=0.0,
+                          spin=0.1, effort=0.05, orient=1.0, crash=10.0))
+
+    use_replay_buffer = cfg.replay_buffer_sample_prob > 0.0
+
+    env = QuadrotorEnvRacing(dynamics_params=cfg.quad_type,
+                             dynamics_change=dynamics_change,
+                             dynamics_randomize_every=cfg.dyn_randomize_every,
+                             dyn_sampler_1=sampler_1,
+                             raw_control=cfg.raw_control,
+                             raw_control_zero_middle=cfg.raw_control_zero_middle,
+                             obs_repr=cfg.quads_obs_repr,
+                             ep_time=cfg.episode_duration,
+                             track_gate_nums=cfg.track_gate_nums,
+                             num_vis_gates=cfg.num_vis_gates,
+                             num_render_gates=cfg.num_render_gates,
+                             room_length=room_dims[0],
+                             room_width=room_dims[1],
+                             room_height=room_dims[2],
+                             init_random_state=cfg.init_random_state,
+                             rew_coeff=rew_coeff,
+                             quads_mode=cfg.quads_mode,
+                             quads_formation=cfg.quads_formation,
+                             quads_formation_size=cfg.quads_formation_size,
+                             quads_use_numba=cfg.quads_use_numba,
+                             quads_settle=cfg.quads_settle,
+                             quads_settle_range_meters=cfg.quads_settle_range_meters,
+                             quads_vel_reward_out_range=cfg.quads_vel_reward_out_range,
+                             quads_obstacle_mode=cfg.quads_obstacle_mode,
+                             quads_view_mode=cfg.quads_view_mode,
+                             quads_obstacle_type=cfg.quads_obstacle_type,
+                             quads_obstacle_size=cfg.quads_obstacle_size,
+                             adaptive_env=cfg.quads_adaptive_env,
+                             obstacle_traj=cfg.quads_obstacle_traj,
+                             collision_hitbox_radius=cfg.quads_collision_hitbox_radius,
+                             collision_falloff_radius=cfg.quads_collision_falloff_radius,
+                             use_replay_buffer=use_replay_buffer,
+                             controller_type=cfg.controller_type,
+                             obstacle_obs_mode=cfg.quads_obstacle_obs_mode,
+                             obst_penalty_fall_off=cfg.quads_obst_penalty_fall_off, )
+
+    env = RacingObsWrapper(env)
+    env = ActRepeatWrapper(env, cfgs.action_repeat)
+
+    cfgs.obs_shape = cfgs.buffer_shape = tuple(int(x) for x in env.observation_space.shape)
+    cfgs.action_shape = tuple(int(x) for x in env.action_space.shape)
+    cfgs.action_dim = env.action_space.shape[0]
+    # cfgs.buffer_shape = tuple(int(x + 1 + cfgs.env.num_vis_gates * 4) for x in env.observation_space.shape)
+
+    return env
+
+
 def make_pybullet_drone_env(cfg):
     domain, task = cfg.task.replace('-', '_').split('_', 1)
     env_id = task + str('-aviary-v0')
@@ -93,6 +163,37 @@ def make_pybullet_drone_env(cfg):
     print("[INFO] Observation space:", env.observation_space)
 
     return env
+
+
+class RacingObsWrapper(gym.Wrapper):
+    def __init__(self, env: QuadrotorEnvRacing):
+        super().__init__(env)
+        self._env = env
+        self.dynamics = env.env.dynamics
+        self.mean, self.std = self.calculate_z_score_()
+
+    def _modify_obs(self, obs):
+        obs = (obs - self.mean) / self.std
+        return obs
+
+    def resset(self):
+        obs = self._env.reset()
+        return self._modify_obs(obs)
+
+    def step(self, action):
+        obs, rew, done, info = self._env.step(action)
+        obs = self._modify_obs(obs)
+        return obs, rew, done, info
+
+    @staticmethod
+    def calculate_z_score_(traj_sequences_dir='/home/yibo/spaces/racing_traj/z_score/obs_sequences6_rep18_1000.pkl'):
+        traj_sequences = pickle.load(open(traj_sequences_dir, 'rb'))
+        # calculate the mean and std
+        traj_sequences = np.concatenate(traj_sequences, axis=0)
+        mean = np.mean(traj_sequences, axis=0)
+        std = np.std(traj_sequences, axis=0)
+        # calculate the z-score
+        return mean, std
 
 
 class QuadObsWrapper(gym.Wrapper):
@@ -149,6 +250,7 @@ class ActRepeatWrapper(gym.Wrapper):
         return self._env.reset()
 
 
+# wrapper for multi-env
 class CompatibilityWrapper(gym.Wrapper):
     def __init__(self, env):
         super(CompatibilityWrapper, self).__init__(env)

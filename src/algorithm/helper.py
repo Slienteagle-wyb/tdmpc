@@ -427,7 +427,7 @@ class RolloutBuffer:
         self.capacity = min(cfg.train_steps, cfg.max_buffer_size)
         dtype = torch.float32 if cfg.modality == 'state' else torch.uint8
         if cfg.modality == 'state':
-            obs_shape = cfg.obs_shape
+            obs_shape = cfg.buffer_shape
         else:
             obs_shape = (3, *cfg.obs_shape[-2:])
         self._obs = torch.empty((self.capacity + 1, *obs_shape), dtype=dtype, device=self.device)
@@ -468,7 +468,7 @@ class RolloutBuffer:
             max_priority = 1. if self.idx == 0 else self._priorities[:self.idx].max().to(self.device).item()
         mask = torch.arange(episode_length) >= episode_length - self.cfg.horizon
         new_priorities = torch.full((episode_length,), max_priority, device=self.device)
-        # mask the priority of last 5 transitions to be 0
+        # mask the priority of last transitions inside the horizon to be 0
         new_priorities[mask] = 0
         self._priorities[self.idx:self.idx + episode_length] = new_priorities
         self.idx = (self.idx + episode_length) % self.capacity

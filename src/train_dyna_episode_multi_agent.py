@@ -1,22 +1,23 @@
 import warnings
 import matplotlib.pyplot as plt
 import tqdm
-warnings.filterwarnings('ignore')
+# warnings.filterwarnings('ignore')
 import os
 os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
 import torch
 import numpy as np
 import gym
+import pickle
 
-gym.logger.set_level(40)
+# gym.logger.set_level(40)
 import time
 import random
 from pathlib import Path
 from cfg import parse_cfg
 from tdmpc.envs.env import make_env
-from tdmpc.envs.quad_envs import make_quadrotor_env_multi
+from tdmpc.envs.quad_envs import make_quadrotor_env_multi, make_quadrotor_env_racing
 from algorithm.tdmpc_similarity import TDMPCSIM
-from algorithm.tdmpc_similarity_drnn import TdMpcSimDssm
+from algorithm.tdsim_drnn_racing import TdMpcSimDssmR
 from algorithm.helper import Episode, RolloutBuffer
 from gym_art.quadrotor_single.quad_utils import *
 import logger
@@ -84,7 +85,8 @@ def train(cfg):
     assert torch.cuda.is_available()
     set_seed(cfg.seed)
     work_dir = Path().cwd() / __LOGS__ / cfg.task / cfg.modality / cfg.exp_name / str(cfg.seed)
-    env, agent, buffer = make_quadrotor_env_multi(cfg), TDMPCSIM(cfg), RolloutBuffer(cfg)
+    # env, agent, buffer = make_quadrotor_env_multi(cfg), TDMPCSIM(cfg), RolloutBuffer(cfg)
+    env, agent, buffer = make_quadrotor_env_racing(cfg), TDMPCSIM(cfg), RolloutBuffer(cfg)
 
     # Run training
     L = logger.Logger(work_dir, cfg)
@@ -138,19 +140,36 @@ def train(cfg):
     print('Training completed successfully')
 
 
+class DummyPolicy(object):
+    def __init__(self, dt=0.01, switch_time=2.5):
+        self.action = np.zeros([4, ])
+        self.dt = 0.
+
+    def step(self, x):
+        return self.action
+
+    def reset(self):
+        pass
+
+
 def test_gym_art_multi_agent(cfg):
     assert torch.cuda.is_available()
     set_seed(cfg.seed)
     work_dir = Path().cwd() / __LOGS__ / cfg.task / cfg.modality / cfg.exp_name / str(cfg.seed)
-    env, agent, buffer = make_quadrotor_env_multi(cfg), TdMpcSimDssm(cfg), RolloutBuffer(cfg)
+    # env, agent, buffer = make_quadrotor_env_multi(cfg), TdMpcSimDssm(cfg), RolloutBuffer(cfg)
+    env, agent, buffer = make_quadrotor_env_racing(cfg), TdMpcSimDssmR(cfg), RolloutBuffer(cfg)
+
     # load the model for test
     fp = os.path.join(work_dir, cfg.model_path)
     agent.load(fp)
+    print('have loaded the model from {}'.format(fp))
+    policy = DummyPolicy()
     episode_rewards = []
     num_rollouts = 10
     plot_thrusts = False
     plot_step = None
     plot_obs = False
+    obs_sequences = []
 
     start_time = time.time()
     for rollout_id in tqdm.tqdm(range(num_rollouts)):
@@ -164,6 +183,7 @@ def test_gym_art_multi_agent(cfg):
         while not done:
             if cfg.env.render and (step_count % 2 == 0):
                 env.render()
+                time.sleep(0.01)
 
             if step_count < 0:
                 # actor of the off-policy ac
@@ -174,14 +194,16 @@ def test_gym_art_multi_agent(cfg):
                 # online planing policy
                 hidden = agent.model.init_hidden_state(batch_size=1, device='cuda')
                 action, _, _ = agent.plan(s, hidden, eval_mode=True, step=0, t0=step_count == 0)
-
-            s, reward, done, info = env.step(action.cpu().numpy())
-            dist_to_goal = np.linalg.norm(env.envs[0].dynamics.pos - env.envs[0].goal)
+                # action = np.random.random(4) * 2 - 1
+                # action = policy.step(s)
+            s, reward, done, info = env.step(action.squeeze().cpu().numpy())
+            # dist_to_goal = np.linalg.norm(env.envs[0].dynamics.pos - env.envs[0].goal)
             # print(dist_to_goal)
             # print(s[0:3], env.envs[0].dynamics.pos, env.envs[0].goal)
             r_sum += reward
-            actions.append((action.cpu().numpy() + np.ones(4)) * 0.5)
-            thrusts.append(env.envs[0].dynamics.thrust_cmds_damp)
+            # actions.append((action.cpu().numpy() + np.ones(4)) * 0.5)
+            actions.append(action)
+            # thrusts.append(env.dynamics.thrust_cmds_damp)
             observations.append(s)
             # record the relative pos to target and attitude represented by quaternion
             quat = R2quat(rot=s[6:15])
@@ -202,6 +224,9 @@ def test_gym_art_multi_agent(cfg):
 
             step_count += 1
         print(r_sum, step_count)
+        observation_traj = np.array(observations, dtype=np.float32)
+        obs_sequences.append(observation_traj)
+
         episode_rewards.append(r_sum)
         # print(np.nanmean(episode_rewards))
 
@@ -218,6 +243,14 @@ def test_gym_art_multi_agent(cfg):
             input("Press Enter to continue...")
         print("##############################################################")
         print("Total time: ", time.time() - start_time)
+
+    # save the pkls
+    work_dir = f'/home/yibo/spaces/racing_traj/z_score'
+    if not os.path.exists(work_dir):
+        os.makedirs(work_dir)
+    with open(os.path.join(work_dir, 'obs_sequences6_rep18_1000_test.pkl'), 'wb') as f:
+        pickle.dump(obs_sequences, f)
+    print('saved the obs sequences')
 
 
 if __name__ == '__main__':
