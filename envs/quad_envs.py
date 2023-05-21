@@ -99,8 +99,8 @@ def make_quadrotor_env_racing(cfgs):
 
     rew_coeff = DEFAULT_QUAD_REWARD_SHAPING['quad_rewards']
     rew_coeff.update(dict(progress=cfgs.progress_coef,
-                          safety=cfgs.safety_coef, pos=0.0,
-                          spin=0.1, effort=0.05, orient=1.0, crash=10.0))
+                          safety=cfgs.safety_coef, pos=0.00,
+                          spin=0.1, effort=0.05, orient=1.0, crash=10.0, direction=0.0))
 
     use_replay_buffer = cfg.replay_buffer_sample_prob > 0.0
 
@@ -140,14 +140,13 @@ def make_quadrotor_env_racing(cfgs):
                              obstacle_obs_mode=cfg.quads_obstacle_obs_mode,
                              obst_penalty_fall_off=cfg.quads_obst_penalty_fall_off, )
 
-    env = RacingObsWrapper(env)
+    env = RacingObsWrapper(env, cfg)
     env = ActRepeatWrapper(env, cfgs.action_repeat)
 
-    cfgs.obs_shape = cfgs.buffer_shape = tuple(int(x) for x in env.observation_space.shape)
+    cfgs.obs_shape = tuple(int(x) for x in env.observation_space.shape)
+    cfgs.buffer_shape = tuple(int(x + cfgs.env.num_vis_gates * 4) for x in env.observation_space.shape)
     cfgs.action_shape = tuple(int(x) for x in env.action_space.shape)
     cfgs.action_dim = env.action_space.shape[0]
-    # cfgs.buffer_shape = tuple(int(x + 1 + cfgs.env.num_vis_gates * 4) for x in env.observation_space.shape)
-
     return env
 
 
@@ -166,14 +165,14 @@ def make_pybullet_drone_env(cfg):
 
 
 class RacingObsWrapper(gym.Wrapper):
-    def __init__(self, env: QuadrotorEnvRacing):
+    def __init__(self, env: QuadrotorEnvRacing, cfgs):
         super().__init__(env)
         self._env = env
         self.dynamics = env.env.dynamics
-        self.mean, self.std = self.calculate_z_score_()
+        self.mean, self.std = self.calculate_z_score_(cfgs.seq_dir)
 
     def _modify_obs(self, obs):
-        obs = (obs - self.mean) / self.std
+        obs[:18] = (obs[:18] - self.mean[:18]) / (self.std[:18] + 1e-6)
         return obs
 
     def resset(self):
@@ -186,7 +185,7 @@ class RacingObsWrapper(gym.Wrapper):
         return obs, rew, done, info
 
     @staticmethod
-    def calculate_z_score_(traj_sequences_dir='/home/yibo/spaces/racing_traj/z_score/obs_sequences6_rep18_1000.pkl'):
+    def calculate_z_score_(traj_sequences_dir=None):
         traj_sequences = pickle.load(open(traj_sequences_dir, 'rb'))
         # calculate the mean and std
         traj_sequences = np.concatenate(traj_sequences, axis=0)

@@ -1,10 +1,9 @@
 import warnings
-import matplotlib.pyplot as plt
-import tqdm
 warnings.filterwarnings('ignore')
 import os
+
 os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
-# os.environ['MUJOCO_GL'] = 'egl'
+os.environ['MUJOCO_GL'] = 'egl'
 import torch
 import numpy as np
 import gym
@@ -14,13 +13,11 @@ import time
 import random
 from pathlib import Path
 from cfg import parse_cfg
-from envs.quad_envs import make_quadrotor_env_multi, make_quadrotor_env_racing
-from algorithm.tdmpc import TDMPC
-from algorithm.tdmpc_similarity import TDMPCSIM
-from algorithm.tdsim_drnn_racing import TdMpcSimDssmR
-from algorithm.helper import Episode, ReplayBuffer, RolloutBuffer
-from gym_art.quadrotor_single.quad_utils import *
+from envs.mujoco_envs import make_robohive_env
+from algorithm.tdmpc_icem_similarity_drnn import TdICemSimDssm
+from algorithm.helper import Episode, RolloutBuffer
 import logger
+from robohive.utils import tensor_utils
 
 torch.backends.cudnn.benchmark = True
 __CONFIG__, __LOGS__ = 'cfgs', 'logs'
@@ -35,35 +32,29 @@ def set_seed(seed):
 
 def evaluate(env, agent, num_episodes, step, env_step, video):
     """Evaluate a trained agent and optionally save a video."""
-    episode_rewards = []
-    episode_rewards_mean = []
-    episode_length = []
-    complete_rate, mean_traverse_ticks = [], []
+    episode_rewards, paths = [], []
     for i in range(num_episodes):
+        env_infos = []
         obs, done, ep_reward, t = env.reset(), False, 0, 0
         if video:
             video.init(env, enabled=(i == 0))
         while not done:
             hidden = agent.model.init_hidden_state(batch_size=1, device='cuda')
-            action, hidden, _ = agent.plan(obs, hidden, eval_mode=True, step=step, t0=t == 0)
-            obs, reward, done, info = env.step(action.cpu().numpy())
+            action, hidden, _ = agent.plan_icem(obs, hidden, eval_mode=True, step=step, t0=t == 0)
+            obs, reward, done, env_info = env.step(action.cpu().numpy())
+            env_infos.extend(env_info)
             ep_reward += reward
             if video:
                 video.record(env)
             t += 1
         episode_rewards.append(ep_reward)
-        episode_rewards_mean.append(ep_reward/t)
-        episode_length.append(t)
-        complete_rate.append(info['complete_rate'])
-        mean_traverse_ticks.append(info['mean_traverse_ticks'])
         if video:
             video.save(env_step)
+        path = dict(env_infos=tensor_utils.stack_tensor_dict_list(env_infos))
+        paths.append(path)
+    success_percentage = env.env.evaluate_success(paths)
     return {'episode_reward': np.nanmean(episode_rewards),
-            'episode_reward_mean': np.nanmean(episode_rewards_mean),
-            'episode_length': int(np.nanmean(episode_length)),
-            'complete_rate': np.nanmean(complete_rate),
-            'mean_traverse_ticks': np.nanmean(mean_traverse_ticks)
-            }
+            'success_rate': success_percentage}
 
 
 def evaluate_pi(env, agent, num_episodes, step, env_step, video):
@@ -92,17 +83,7 @@ def train(cfg):
     assert torch.cuda.is_available()
     set_seed(cfg.seed)
     work_dir = Path().cwd() / __LOGS__ / cfg.task / cfg.modality / cfg.exp_name / str(cfg.seed)
-    model_dir = Path().cwd() / __LOGS__ / cfg.task / cfg.modality / cfg.exp_name / str(cfg.pretrained_seed)
-    # env, agent, buffer = make_quadrotor_env_multi(cfg), TDMPCSIM(cfg), RolloutBuffer(cfg)
-    env, agent, buffer = make_quadrotor_env_racing(cfg), TdMpcSimDssmR(cfg), RolloutBuffer(cfg)
-    demo_buffer = RolloutBuffer(cfg)
-    # load the pretrained model for fine_tuning
-    fp = os.path.join(model_dir, cfg.model_path)
-    agent.load(fp)
-    print('Have loaded the pretrained model successfully!!')
-    if cfg.freeze_encoder:
-        print('Have frozen the pretrained encoder head')
-        agent.model.freeze_encoder(enable=False)
+    env, agent, buffer = make_robohive_env(cfg), TdICemSimDssm(cfg), RolloutBuffer(cfg)
 
     # Run training
     L = logger.Logger(work_dir, cfg)
@@ -113,23 +94,18 @@ def train(cfg):
         obs = env.reset()
         episode = Episode(cfg, obs)
         hidden = None
-        external_reward_mean_list, current_std_mean_list = [], []
-        complete_rate_list, mean_traverse_ticks_list = [], []
+        external_reward_mean_list = []
+        current_std_mean_list = []
         while not episode.done:
             hidden = agent.model.init_hidden_state(batch_size=1, device='cuda')
-            action, hidden, plan_metrics = agent.plan(obs, hidden, step=ctrl_step, t0=episode.first, fine_tuning=True)
+            action, hidden, plan_metrics = agent.plan_icem(obs, hidden, step=ctrl_step, t0=episode.first)
             external_reward_mean_list.append(plan_metrics['external_reward_mean'])
             current_std_mean_list.append(plan_metrics['current_std'])
             obs, reward, done, info = env.step(action.cpu().numpy())
-            complete_rate_list.append(info['complete_rate'])
-            mean_traverse_ticks_list.append(info['mean_traverse_ticks'])
             episode += (obs, action, reward, done)
             ctrl_step += 1
         episode_length = len(episode)
-        if ctrl_step >= cfg.seed_steps:
-            buffer += episode
-        else:
-            demo_buffer += episode
+        buffer += episode
 
         # Update model
         train_metrics = {}
@@ -137,7 +113,7 @@ def train(cfg):
             num_updates = cfg.seed_steps if iters == 0 else episode_length
             for i in range(num_updates):
                 iters += 1
-                train_metrics.update(agent.finetune(buffer, iters, demo_buffer))
+                train_metrics.update(agent.update(buffer, iters))
 
         # Log training episode
         episode_idx += 1
@@ -148,23 +124,18 @@ def train(cfg):
             'env_step': env_step,
             'total_time': time.time() - start_time,
             'episode_reward': episode.cumulative_reward,
-            'episode_length': len(episode),
-            'external_reward_mean': np.mean(external_reward_mean_list),
-            'current_std': np.mean(current_std_mean_list),
-            'complete_rate': np.mean(complete_rate_list),
-            'mean_traverse_ticks': np.mean(mean_traverse_ticks_list),
-        }
+            'episode_length': len(episode)}
         train_metrics.update(common_metrics)
         L.log(train_metrics, category='train')
 
         # Evaluate agent periodically
-        if (episode_idx-1) % (cfg.eval_freq / 250) == 0:
+        if (episode_idx - 1) % cfg.eval_freq_episodes == 0:
             common_metrics.update(evaluate(env, agent, cfg.eval_episodes, iters, env_step, L.video))
-            common_metrics['episode_reward_pi'] = evaluate_pi(env, agent, cfg.eval_episodes, iters, env_step, L.video)
+            # common_metrics['episode_reward_pi'] = evaluate_pi(env, agent, cfg.eval_episodes, iters, env_step, L.video)
             L.log(common_metrics, category='eval')
 
         # save model every save epoch interval
-        if episode_idx % int(cfg.save_interval) == 0:
+        if episode_idx % int(cfg.save_interval) == 0 and episode_idx >= 500:
             L.save_model(agent, episode_idx)
 
     L.finish(agent)

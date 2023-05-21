@@ -1,6 +1,5 @@
 train_steps: 5000000/${action_repeat}
 action_repeat: 2
-action_latent: 32
 iterations: 8
 latent_dim: 100
 batch_size: 2048

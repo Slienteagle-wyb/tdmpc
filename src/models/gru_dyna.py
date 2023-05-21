@@ -12,7 +12,6 @@ class DGruDyna(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = deepcopy(cfg)
-        # self.a_proj = nn.Linear(cfg.action_dim, cfg.action_latent, bias=False)
         self.prior_mlp = h.mlp_norm(cfg.hidden_dim, cfg.mlp_dim, cfg.latent_dim, cfg)
         if cfg.norm_cell:
             self.gru_cell = NormGRUCell(cfg.latent_dim+cfg.action_dim, cfg.hidden_dim)
@@ -24,7 +23,6 @@ class DGruDyna(nn.Module):
         return torch.zeros((batch_size, self.cfg.hidden_dim), device=device)
 
     def forward(self, obs_embed, action, h_prev):
-        # action_embed = self.a_proj(action)
         x = torch.cat([obs_embed, action], dim=-1)
         h = self.gru_cell(x, h_prev)
         z_pred = self.prior_mlp(h)

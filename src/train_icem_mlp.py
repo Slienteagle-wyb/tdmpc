@@ -14,8 +14,7 @@ import random
 from pathlib import Path
 from cfg import parse_cfg
 from envs.env import make_env
-from algorithm.tdmpc_icem_similarity_drnn import TdICemSimDssm
-from algorithm.tdmpc_icem_similarity_drnn_shooting import TdICemSimDssmShooting
+from algorithm.tdmpc_icem_similarity_mlp import TdICemSimMlp
 from algorithm.helper import Episode, ReplayBuffer
 import logger
 
@@ -31,23 +30,21 @@ def set_seed(seed):
 
 
 def evaluate(env, agent, num_episodes, step, env_step, video):
-    """Evaluate a trained agent and optionally save a video."""
     episode_rewards = []
     for i in range(num_episodes):
         obs, done, ep_reward, t = env.reset(), False, 0, 0
         if video:
             video.init(env, enabled=(i == 0))
-        hidden = None
         while not done:
-            if t == 0 or t % 1 == 0:
-                hidden = agent.model.init_hidden_state(batch_size=1, device='cuda')
-            action, hidden, _ = agent.plan(obs, hidden, eval_mode=True, step=step, t0=t == 0)
+            action, _ = agent.plan(obs, eval_mode=True, step=step, t0=t == 0)
             obs, reward, done, _ = env.step(action.cpu().numpy())
             ep_reward += reward
-            if video: video.record(env)
+            if video:
+                video.record(env)
             t += 1
         episode_rewards.append(ep_reward)
-        if video: video.save(env_step)
+        if video:
+            video.save(env_step)
     return np.nanmean(episode_rewards)
 
 
@@ -77,7 +74,7 @@ def train(cfg):
     assert torch.cuda.is_available()
     set_seed(cfg.seed)
     work_dir = Path().cwd() / __LOGS__ / cfg.task / cfg.modality / cfg.exp_name / str(cfg.seed)
-    env, agent, buffer = make_env(cfg), TdICemSimDssm(cfg), ReplayBuffer(cfg, latent_plan=True)
+    env, agent, buffer = make_env(cfg), TdICemSimMlp(cfg), ReplayBuffer(cfg, latent_plan=True)
 
     # Run training
     L = logger.Logger(work_dir, cfg)
@@ -87,15 +84,12 @@ def train(cfg):
         # Collect trajectory
         obs = env.reset()
         episode = Episode(cfg, obs)
-        hidden = None
         total_train_step = step
         external_reward_mean_list = []
         current_std_mean_list = []
         while not episode.done:
             # reset the hidden state for gru every cfg.horizon step.
-            if episode.first or total_train_step % 1 == 0:
-                hidden = agent.model.init_hidden_state(batch_size=1, device='cuda')
-            action, hidden, plan_metrics = agent.plan(obs, hidden, step=step, t0=episode.first)
+            action, plan_metrics = agent.plan(obs, step=step, t0=episode.first)
             external_reward_mean_list.append(plan_metrics['external_reward_mean'])
             current_std_mean_list.append(plan_metrics['current_std'])
             obs, reward, done, _ = env.step(action.cpu().numpy())

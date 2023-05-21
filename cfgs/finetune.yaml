@@ -1,8 +1,8 @@
 freeze_encoder: true
-demo_schedule: linear(0.95, 0.25, 80000, 20000)  # schedule throughout the fine_tuning process
-std_schedule: linear(0.1, 0.05, 20000, 0)  # duration 25000 train step (start:0.5, final:0.05)
+demo_schedule: linear(0.95, 0.25, 30000, 20000)  # schedule half the fine_tuning process
+std_schedule: linear(0.1, 0.05, 10000, 20000)  # duration half the seed iters (start:0.1, final:0.05)
 horizon_schedule: linear(5, 5, 1, 0)  # (start:1, final:5)
 regularization_schedule: linear(0.5, 0.5, 1, 0)  # (1, 5000)
-seed_steps: 20000
+seed_steps: 20000  # twenty percent of the train steps
 lr: 1e-4
 pi_lr: 1e-4

@@ -16,6 +16,8 @@ from pathlib import Path
 from cfg import parse_cfg
 from envs.env import make_env, make_hms_env, make_mujoco_env
 from algorithm.tdmpc_similarity_drnn import TdMpcSimDssm
+from algorithm.cqmpc_similarity_drnn import CqMpcSimDssm
+from algorithm.tdbc_mpc_similarity_drnn import TdBcMpcSimDssm
 from algorithm.helper import Episode, ReplayBuffer
 import logger
 
@@ -41,7 +43,7 @@ def evaluate(env, agent, num_episodes, step, env_step, video):
         while not done:
             if t == 0 or t % 1 == 0:
                 hidden = agent.model.init_hidden_state(batch_size=1, device='cuda')
-            action, hidden, _ = agent.plan(obs, hidden, eval_mode=True, step=step, t0=t == 0)
+            action, _ = agent.plan(obs, hidden, eval_mode=True, step=step, t0=t == 0)
             obs, reward, done, _ = env.step(action.cpu().numpy())
             ep_reward += reward
             if video: video.record(env)
@@ -98,7 +100,7 @@ def train(cfg):
             # reset the hidden state for gru every cfg.horizon step.
             if episode.first or total_train_step % 1 == 0:
                 hidden = agent.model.init_hidden_state(batch_size=1, device='cuda')
-            action, hidden, plan_metrics = agent.plan(obs, hidden, step=step, t0=episode.first)
+            action, plan_metrics = agent.plan(obs, hidden, step=step, t0=episode.first)
             intrinsic_reward_mean_list.append(plan_metrics['intrinsic_reward_mean'])
             external_reward_mean_list.append(plan_metrics['external_reward_mean'])
             current_std_mean_list.append(plan_metrics['current_std'])

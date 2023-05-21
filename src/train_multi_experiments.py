@@ -84,7 +84,7 @@ def train(config):
     env, agent, buffer = make_env(cfg), TdICemSimDssm(cfg), ReplayBuffer(cfg, latent_plan=True)
 
     # Run training
-    cfg.wandb_exp_name = cfg.wandb_exp_name + '_' + str(cfg.horizon)
+    cfg.wandb_exp_name = cfg.wandb_exp_name + '_' + str(cfg.noise_beta)
     L = logger.Logger(work_dir, cfg)
     episode_idx, start_time = 0, time.time()
     for step in range(0, cfg.train_steps + cfg.episode_length, cfg.episode_length):
@@ -141,11 +141,11 @@ def train(config):
     print('Training completed successfully')
 
 
-def main(num_samples=1, gpus_per_trail=0.4):
-    object_store_memory = 24 * 1024 * 1024 * 1024
+def main(num_samples=2, gpus_per_trail=0.8):
+    object_store_memory = 4 * 1024 * 1024 * 1024
     ray.init(object_store_memory=object_store_memory)
     search_space = {
-        'horizon': tune.grid_search([7, 8, 9]),
+        'horizon': tune.grid_search([8, ]),
         'seed': tune.randint(200, 2000),
     }
     tuner = tune.Tuner(
@@ -165,6 +165,7 @@ def main(num_samples=1, gpus_per_trail=0.4):
         print('Best result: {}'.format(best_result))
     except KeyboardInterrupt:
         print('Keyboard interrupt received, exiting.')
+        tuner.stop()
     finally:
         ray.shutdown()
 

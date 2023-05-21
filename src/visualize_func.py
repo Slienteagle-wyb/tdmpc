@@ -28,23 +28,32 @@ def calculate_z_score(traj_sequences_dir, obs_dim):
 
 
 if __name__ == '__main__':
-    plt.grid(True)
-    # symlog = lambda x: torch.sign(x) * torch.log(1 + torch.abs(x))
-    # symlog1 = lambda x: 2.0 * torch.sign(x) * torch.log(1 + torch.abs(1.0 * x))
-    identity = lambda x: x
-    pos_reward = lambda x: -2.0 * np.log(1.0 + x) + 1
+    # plt.grid(True)
+    # # symlog = lambda x: torch.sign(x) * torch.log(1 + torch.abs(x))
+    # # symlog1 = lambda x: 2.0 * torch.sign(x) * torch.log(1 + torch.abs(1.0 * x))
+    # identity = lambda x: x
+    # pos_reward = lambda x: -2.0 * np.log(1.0 + x) + 1
     x_in = np.linspace(0, 4, 1000)
-    y_in = pos_reward(x_in)
-    # y_in = symlog(x_in)
-    # y_in_1 = symlog1(x_in)
-    y_identity = identity(x_in)
-    y_exp_pos = np.exp(-x_in ** 2)
-    # plt.plot(x_in.numpy(), y_in.numpy(), color='red')
-    # plt.plot(x_in.numpy(), y_in_1.numpy(), color='blue')
-    plt.plot(x_in, y_identity, color='black')
+    y_in = 1.0 * np.random.randn(*x_in.shape)
+    # y_in = pos_reward(x_in)
+    # # y_in = symlog(x_in)
+    # # y_in_1 = symlog1(x_in)
+    # y_identity = identity(x_in)
+    # y_exp_pos = np.exp(-x_in ** 2)
+    # # plt.plot(x_in.numpy(), y_in.numpy(), color='red')
+    # # plt.plot(x_in.numpy(), y_in_1.numpy(), color='blue')
+    # plt.plot(x_in, y_identity, color='black')
     plt.plot(x_in, y_in, color='green')
-    plt.plot(x_in, y_exp_pos, color='red')
+    # plt.plot(x_in, y_exp_pos, color='red')
     plt.show()
 
-    # work_dir = '/home/yibo/spaces/racing_traj/z_score/obs_sequences6_1000.pkl'
-    # mean, std = calculate_z_score(work_dir, 18)
+    # work_dir_restore = f'/home/yibo/spaces/racing_traj/z_score/obs_sequences6_rep19_yaw_1000.pkl'
+    # mean_train, std_train = calculate_z_score(work_dir_restore, 21)
+
+    # work_dir = f'/home/yibo/spaces/racing_traj/z_score/obs_sequences6_rep18_1000_test.pkl'
+    # traj_sequences = pickle.load(open(work_dir, 'rb'))
+    # # calculate the mean and std
+    # print(len(traj_sequences))
+    # traj_sequences = np.concatenate(traj_sequences, axis=0)
+    # vel_traj = traj_sequences[:, 3:6] * std_train[3:6] + mean_train[3:6]
+    # print(np.mean(vel_traj, axis=0), np.max(vel_traj, axis=0), np.min(vel_traj, axis=0))

@@ -1,9 +1,9 @@
-action_repeat: 2
+action_repeat: 1
 episode_length: 1000/${action_repeat}
 train_steps: 500000/${action_repeat}
 
-progress_coef: 200.0
-safety_coef: 2.5
+progress_coef: 150.0
+safety_coef: 5.0
 
 env:
   quad_type: Crazyflie  # quad dynamic type (DefaultQuad, Crazyflie, MediumQuad, RandomQuad)
@@ -13,12 +13,13 @@ env:
   dynamics_randomization_ratio: null # random ratio (float) of sampled dyna parameters
   render: false # if render the 3d scene
   init_random_state: false  # if random initialize the drone state when reset
-  quads_obs_repr: 'xyz_vxyz_R_omega' # obs_representation type
+  quads_obs_repr: 'xyz_vxyz_R_omega' # obs_representation type ['xyz_vxyz_R_omega', 'xyz_vxyz_R_omega_gates_yaw',]
+  seq_dir: '/home/yibo/spaces/racing_traj/z_score/obs_sequences6_rep18_1000.pkl'
   episode_duration: 10.0  # episode time in seconds (1k env_steps/control steps every 10 seconds)?
   controller_type: omega_thrust  # choices ['omega_thrust', 'raw_thrust', 'pid']
   track_gate_nums: 6
   num_render_gates: 6
-  num_vis_gates: 2
+  num_vis_gates: 0
 
   # choose which scenario to run, choices
   # ['static_same_goal', 'static_diff_goal', 'dynamic_same_goal', 'dynamic_diff_goal', 'circular_config',

@@ -2,7 +2,8 @@ train_steps: 3000000/${action_repeat}
 action_repeat: 2
 iterations: 10
 num_samples: 512
-latent_dim: 128
-batch_size: 1024
+num_elites: 64  # 32 for icem, 64 default
+latent_dim: 100
+batch_size: 512
 explore_schedule: linear(0, ${intrinsic_reward_coef}, 250000, 50000)
 regularization_schedule: linear(0.05, ${mixture_coef}, 1, 50000)

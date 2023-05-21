@@ -5,8 +5,6 @@ import numpy as np
 from dm_control import suite
 from dm_control.suite.wrappers import action_scale, pixels
 from dm_env import StepType, specs
-from mjrl.utils.gym_env import GymEnv
-from mj_envs import hand_manipulation_suite
 from gym.wrappers import RecordEpisodeStatistics, NormalizeReward
 import gym
 import warnings
@@ -358,21 +356,8 @@ def make_mujoco_env(cfg):
 	return env
 
 
-def make_hms_env(cfg):
-	"""
-	Make Hands manipulation suite environment for TD-MPC experiments.
-	This simulation is powered by mujoco adapted from mj_envs
-	"""
-	env_id = cfg.task
-	env = GymEnv(env_id, act_repeat=cfg.action_repeat)
-	cfg.obs_shape = (env.spec.observation_dim, )
-	cfg.action_shape = (env.spec.action_dim, )
-	cfg.action_dim = env.spec.action_dim
-	return env
-
-
 # if __name__ == '__main__':
-# 	env = gym.make('Ant-v2')
+# 	env = gym.make('pen-v0')
 # 	env = TimeLimitWrapper(env)
 # 	env = RecordEpisodeStatistics(env)
 # 	env = ActRepeatWrapper(env, 2)

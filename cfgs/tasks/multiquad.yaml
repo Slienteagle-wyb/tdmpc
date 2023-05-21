@@ -1,5 +1,5 @@
 action_repeat: 1
-episode_length: 1600/${action_repeat}
+episode_length: 1000/${action_repeat}
 train_steps: 320000/${action_repeat}
 env:
   quads_num_agents: 1 # total num of the quad in one environment
@@ -12,13 +12,13 @@ env:
   sense_noise: default
   init_random_state: true  # if random initialize the drone state when reset
   quads_obs_repr: 'xyz_vxyz_R_omega' # obs_representation type
-  episode_duration: 16.0  # episode time in seconds (1k env_steps/control steps every 10 seconds)?
-  controller_type: omega_thrust  # choices ['omega_thrust', 'raw_thrust']
+  episode_duration: 10.0  # episode time in seconds (1k env_steps/control steps every 10 seconds)?
+  controller_type: omega_thrust  # choices ['omega_thrust', 'raw_thrust', 'Nonlinear']
 
   # choose which scenario to run, choices
   # ['static_same_goal', 'static_diff_goal', 'dynamic_same_goal', 'dynamic_diff_goal', 'circular_config',
   # 'ep_lissajous3D', 'ep_rand_bezier', 'swarm_vs_swarm', 'swap_goals', 'dynamic_formations', 'mix', 'tunnel']
-  quads_mode: static_diff_goal
+  quads_mode: static_same_goal
   # choices ['circle_xz_vertical', 'circle_yz_vertical', 'circle_horizontal',
   # 'sphere', 'grid_xz_vertical', 'grid_yz_vertical',  'grid_horizontal', 'traverse_gate']
   quads_formation: circle_horizontal

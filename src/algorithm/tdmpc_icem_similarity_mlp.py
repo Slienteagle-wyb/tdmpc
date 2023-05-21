@@ -1,4 +1,5 @@
 import numpy as np
+import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -17,8 +18,8 @@ class DSSM(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
-        self._dynamics = DGruDyna(cfg)
-        self._reward = h.mlp(cfg.hidden_dim, cfg.mlp_dim, 1)
+        self._dynamics = h.mlp(cfg.latent_dim + cfg.action_dim, cfg.mlp_dim, cfg.latent_dim)
+        self._reward = h.mlp(cfg.latent_dim + cfg.action_dim, cfg.mlp_dim, 1)
         self._pi = h.mlp(cfg.latent_dim, cfg.mlp_dim, cfg.action_dim)
         self._Q1, self._Q2 = h.q(cfg), h.q(cfg)
         if self.cfg.normalize:
@@ -53,13 +54,9 @@ class DSSM(nn.Module):
             latents = self._encoder(obs)
         return latents
 
-    def next(self, z, a, h_prev):
-        z, hidden = self._dynamics(z, a, h_prev)
-        reward_pred = self._reward(hidden)
-        return z, hidden, reward_pred
-
-    def init_hidden_state(self, batch_size, device):
-        return self._dynamics.init_hidden_state(batch_size, device)
+    def next(self, z, a):
+        x = torch.cat([z, a], dim=-1)
+        return self._dynamics(x), self._reward(x)
 
     def pi(self, z, std=0):
         """Samples an action from the learned policy (pi)."""
@@ -78,9 +75,7 @@ class DSSM(nn.Module):
         return self._predictor(z)
 
 
-class TdICemSimDssm:
-    """Implementation of TD-MPC learning + inference."""
-
+class TdICemSimMlp:
     def __init__(self, cfg):
         self.cfg = cfg
         self.device = torch.device('cuda')
@@ -88,15 +83,14 @@ class TdICemSimDssm:
         self.mixture_coef = h.linear_schedule(self.cfg.regularization_schedule, 0)
         self.model = DSSM(cfg).cuda()
         self.model_target = deepcopy(self.model)
-        # self.aug_generator = h.RandomAdditiveGaussianNoise(cfg)
-        self.traj_aug = h.RandomAdditiveGaussianNoiseAug(cfg, scale=0.1)
-        self.dyna_aug = h.RandomAdditiveGaussianNoiseAug(cfg, scale=0.1)
+        # self.aug = h.RandomShiftsAug(cfg)
+        self.reward_rms = RunningMeanStd()
+        self.aug = h.RandomAdditiveGaussianNoiseAug(cfg)
+
         self.model.eval()
         self.model_target.eval()
-        self.reward_rms = RunningMeanStd()
 
         self.plan_horizon = 1
-        self.explore_coef = 0
         total_epochs = int(cfg.train_steps / cfg.episode_length)
         self._optim_initialize(total_epochs)
 
@@ -122,11 +116,11 @@ class TdICemSimDssm:
         self.model_target.load_state_dict(d['model_target'])
 
     @torch.no_grad()
-    def estimate_value(self, z, actions, hidden):
+    def estimate_value(self, z, actions):
         """Estimate value of a trajectory starting at latent state z and executing given actions."""
         G, discount = 0, 1
         for t in range(self.plan_horizon):
-            z, hidden, reward = self.model.next(z, actions[t], hidden)
+            z, reward = self.model.next(z, actions[t])
             G += discount * reward
             discount *= self.cfg.discount
         G += discount * torch.min(*self.model.Q(z, self.model.pi(z, self.cfg.min_std)))
@@ -137,8 +131,8 @@ class TdICemSimDssm:
             noise = colorednoise.powerlaw_psd_gaussian(self.cfg.noise_beta,
                                                        size=(num_samples,
                                                              self.cfg.action_dim,
-                                                             self.plan_horizon))
-            noise = torch.from_numpy(noise).float().to(self.device).permute(2, 0, 1)
+                                                             self.cfg.horizon))
+            noise = torch.from_numpy(noise).float().to(self.device).permute(2, 0, 1)[:self.plan_horizon]
         else:
             noise = torch.randn(self.plan_horizon, num_samples,
                                 self.cfg.action_dim, device=self.device)
@@ -166,14 +160,14 @@ class TdICemSimDssm:
         return actions_sampled
 
     @torch.no_grad()
-    def plan(self, obs, hidden, eval_mode=False, step=None, t0=True):
+    def plan(self, obs, eval_mode=False, step=None, t0=True):
         intrinsic_reward_mean, reward_mean = 0, 0
         extend_horizon = False
         plan_metrics = {'external_reward_mean': 0.0, 'current_std': 0.0}
         # initialize seeds steps
         if step < self.cfg.seed_steps and not eval_mode:
             return torch.empty(self.cfg.action_dim, dtype=torch.float32,
-                               device=self.device).uniform_(-1, 1), None, plan_metrics
+                               device=self.device).uniform_(-1, 1), plan_metrics
         # # prepare params at the start of rollout
         # schedule the horizon and mixture coefficient of policy
         horizon = int(min(self.cfg.horizon, h.linear_schedule(self.cfg.horizon_schedule, step)))
@@ -183,7 +177,7 @@ class TdICemSimDssm:
         self.mixture_coef = h.linear_schedule(self.cfg.regularization_schedule, step)
         # initialize mean and std
         mean = torch.zeros(self.plan_horizon, self.cfg.action_dim, device=self.device)
-        std = 0.5 * torch.ones(self.plan_horizon, self.cfg.action_dim, device=self.device)
+        std = self.cfg.init_std * torch.ones(self.plan_horizon, self.cfg.action_dim, device=self.device)
         if not t0 and hasattr(self, '_prev_mean'):
             mean[:-1] = self._prev_mean[1:]
             mean[-1] = self._prev_mean[-1]
@@ -196,10 +190,13 @@ class TdICemSimDssm:
         z = self.model.h(obs)
         pi_actions = torch.empty(self.plan_horizon, num_pi_trajs, self.cfg.action_dim, device=self.device)
         zs_pi = z.repeat(num_pi_trajs, 1)
-        hidden_pi = hidden.repeat(num_pi_trajs, 1)
+        # if not eval_mode:
+        #     zs_pi = self.aug(zs_pi)
         for t in range(self.plan_horizon):
             pi_actions[t] = self.model.pi(zs_pi, self.cfg.min_std)
-            zs_pi, hidden_pi, _ = self.model.next(zs_pi, pi_actions[t], hidden_pi)
+            zs_pi, _ = self.model.next(zs_pi, pi_actions[t])
+            # if not eval_mode:
+            #     zs_pi = self.aug(zs_pi)
 
         # Iterate iCEM
         for i in range(self.cfg.iterations):
@@ -214,9 +211,8 @@ class TdICemSimDssm:
                 num_elite_trajs = 0
                 num_trajs = num_samples + num_pi_trajs + num_elite_trajs
             zs_plan = z.repeat(num_trajs, 1)
-            hidden_plan = hidden.repeat(num_trajs, 1)
             # sample actions from the current distribution
-            actions_sampled = self.sample_action_sequence(num_samples, mean, std)
+            actions_sampled = self.sample_mix_action_sequence(num_samples, mean, std)
             if i == self.cfg.iterations - 1:
                 actions_sampled[:, 0] = mean  # use the mean of the last iteration (icem_best-a)
 
@@ -240,7 +236,7 @@ class TdICemSimDssm:
                 actions = torch.cat([actions_sampled, pi_actions[:, :num_pi_trajs]], dim=1)
 
             # Compute elite actions
-            value, reward_mean = self.estimate_value(zs_plan, actions, hidden_plan)
+            value, reward_mean = self.estimate_value(zs_plan, actions)
             elite_idxs = torch.topk(value.squeeze(1), self.cfg.num_elites, dim=0).indices
             elite_value, elite_actions = value[elite_idxs], actions[:, elite_idxs]  # select action of high value
             self._elite_actions = elite_actions
@@ -264,12 +260,12 @@ class TdICemSimDssm:
         if not eval_mode:
             a += std * torch.randn(self.cfg.action_dim, device=std.device)
         # step the model to calculate the next hidden state
-        z, hidden, _ = self.model.next(z[0:1], a.unsqueeze(0), hidden)
+        z, _ = self.model.next(z[0:1], a.unsqueeze(0))
 
         plan_metrics.update({'external_reward_mean': reward_mean,
                              'current_std': std.mean().item()})
 
-        return a, hidden, plan_metrics
+        return a, plan_metrics
 
     def update_pi(self, zs):
         """Update policy using a sequence of latent states."""
@@ -281,7 +277,6 @@ class TdICemSimDssm:
         for t, z in enumerate(zs):
             a = self.model.pi(z, self.cfg.min_std)
             Q = torch.min(*self.model.Q(z, a))
-            # pi_loss += -Q.mean() * (self.cfg.rho ** t)
             pi_loss += -Q.mean()
 
         pi_loss.backward()
@@ -307,9 +302,12 @@ class TdICemSimDssm:
         return 2.0 - 2.0 * (queries_norm * keys_norm).sum(dim=-1)  # (cfg.horizon*batch_size, )
 
     def consistency_loss(self, z_pred, z_target):
-        seg_len = len(z_pred)
-        z_pred = torch.cat(z_pred, dim=0)  # (cfg.horizon*batch_size, latent_dim)
-        z_target = torch.cat(z_target, dim=0)
+        seg_len = z_pred.shape[0]
+        z_pred = z_pred.reshape(seg_len*self.cfg.batch_size, -1)
+        z_target = z_target.reshape(seg_len*self.cfg.batch_size, -1)
+        # seg_len = len(z_pred)
+        # z_pred = torch.cat(z_pred, dim=0)  # (cfg.horizon*batch_size, latent_dim)
+        # z_target = torch.cat(z_target, dim=0)
         seg_loss = torch.mean(h.mse(z_pred, z_target), dim=1, keepdim=True)
         seg_loss_mean = seg_loss.reshape(seg_len, self.cfg.batch_size, -1).mean(dim=0)
         return seg_loss_mean
@@ -318,26 +316,24 @@ class TdICemSimDssm:
     def model_rollout(self, z, actions):
         T, B = actions.shape[:2]
         zs_latent = []
-        hidden = self.model.init_hidden_state(z.shape[0], z.device)
         for t in range(T):
-            z, hidden, _ = self.model.next(z, actions[t], hidden)
+            z, _ = self.model.next(z, actions[t])
             zs_latent.append(z)
         zs_latent = torch.stack(zs_latent, dim=0)
         return zs_latent
 
     @torch.no_grad()
     def intrinsic_rewards(self, obs, next_obses, actions):
-        zs_target = self.model_target.h(next_obses)
-        z_traj = self.model.h(torch.cat([obs.unsqueeze(0), next_obses], dim=0))
-        model_uncertainty = torch.zeros((self.cfg.horizon + 1, self.cfg.horizon + 1, self.cfg.batch_size, 1),
-                                        requires_grad=False).cuda()
-        for t in range(0, z_traj.shape[0] - 1):
-            zs_latent = self.model_rollout(z_traj[t], actions[t:t + 1])
+        zs_target = self.model_target.h(self.aug(next_obses))
+        z_traj = self.model.h(self.aug(torch.cat([obs.unsqueeze(0), next_obses], dim=0)))
+        model_uncertainty = torch.zeros((self.cfg.horizon+1, self.cfg.horizon+1, self.cfg.batch_size, 1), requires_grad=False).cuda()
+        for t in range(0, z_traj.shape[0]-1):
+            zs_latent = self.model_rollout(z_traj[t], actions[t:t+1])
             zs_pred = self.model.pred_z(zs_latent.squeeze(0))
             zs_pred = F.normalize(zs_pred.unsqueeze(0), dim=-1, p=2)
-            target = F.normalize(zs_target[t:t + 1], dim=-1, p=2)
-            partial_pred_loss = 2.0 - 2.0 * (zs_pred * target).sum(dim=-1, keepdim=True)  # (t:t+1, b, 1)
-            model_uncertainty[t][t:t + 1] = partial_pred_loss.detach_()
+            target = F.normalize(zs_target[t:t+1], dim=-1, p=2)
+            partial_pred_loss = 2.0 - 2.0 * (zs_pred * target).sum(dim=-1, keepdim=True)   # (t:t+1, b, 1)
+            model_uncertainty[t][t:t+1] = partial_pred_loss.detach_()
 
         intrinsic_reward = torch.sum(model_uncertainty, dim=0).cpu().data.numpy()  # (t, b, 1)
         reward_mean = np.mean(intrinsic_reward)
@@ -358,67 +354,43 @@ class TdICemSimDssm:
         self.optim.zero_grad(set_to_none=True)
 
         # Representation
-        z = self.model.h(obs)
-        next_zs = self.model_target.h(next_obses)
-        online_next_zs = self.model.h(next_obses)
-        # next_zs, online_next_zs = self.aug(next_zs, online_next_zs)
-        # input_zs = torch.cat([z.unsqueeze(0), online_next_zs], dim=0)
+        z = self.model.h(self.aug(obs))
+        next_zs = self.model_target.h(self.aug(next_obses))
+        online_next_zs = self.model.h(self.aug(next_obses))
         zs = [z.detach()]  # obs embedding for policy learning
-        beliefs = []
+        zs_query, zs_key = [], []
 
         # calculate intrinsic reward for exploration
-        self.explore_coef = h.linear_schedule(self.cfg.explore_schedule, step)
-        intrinsic_rewards = self.intrinsic_rewards(obs, next_obses, action)
-        reward_pi = self.explore_coef * intrinsic_rewards + reward
+        # explore_coef = h.linear_schedule(self.cfg.explore_schedule, step)
+        # intrinsic_rewards = self.intrinsic_rewards(obs, next_obses, action)
+        # reward_pi = explore_coef * intrinsic_rewards + reward
 
-        similarity_loss, reward_loss, value_loss, priority_loss = 0, 0, 0, 0
-        hidden = self.model.init_hidden_state(z.shape[0], z.device)
-        zs_query, zs_key = [], []
+        similarity_loss, reward_loss, value_loss, priority_loss, consistency_loss = 0, 0, 0, 0, 0
         for t in range(self.cfg.horizon):
-            # Predictions
-            rho = (self.cfg.rho ** t)
-            # zs_query, zs_key = [], []
-            # reward_loss_shooting = 0
             Q1, Q2 = self.model.Q(z, action[t])
-            z, hidden, reward_pred = self.model.next(z, action[t], hidden)
-            # z = self.dyna_aug(z)
-            # dyna_noise = self.aug_generator(z)
-            # z = z + dyna_noise
+            z, reward_pred = self.model.next(z, action[t])
             with torch.no_grad():
-                td_target = self._td_target(online_next_zs[t], reward_pi[t])
-            # reward_loss_shooting += h.mse(reward_pred, reward[t])
-            reward_loss += h.mse(reward_pred, reward[t])
-            value_loss += (h.mse(Q1, td_target) + h.mse(Q2, td_target))
-            priority_loss += (h.l1(Q1, td_target) + h.l1(Q2, td_target))
+                td_target = self._td_target(online_next_zs[t], reward[t])
 
             zs_query.append(z)
-            # zs_key.append((next_zs[t] + dyna_noise).detach())
             zs_key.append(next_zs[t].detach())
             zs.append(z.detach())
-            beliefs.append(hidden)  # will be detached internally
 
-            # conduct overshooting for the next states embedding
-            # shoot_hidden = torch.clone(hidden)
-            # shoot_z = torch.clone(z)
-            # shoot_count = 0
-            # for j in range(t + 1, self.cfg.horizon):
-            #     shoot_count += 1
-            #     shoot_z, shoot_hidden, reward_pred = self.model.next(shoot_z, action[j], shoot_hidden)
-            #     shoot_z = self.dyna_aug(shoot_z)
-            #     # dyna_noise = self.aug_generator(shoot_z)
-            #     # shoot_z = shoot_z + dyna_noise
-            #     zs_query.append(shoot_z)
-            #     # zs_key.append((next_zs[j] + dyna_noise).detach())
-            #     zs_key.append(next_zs[j].detach())
-            #     reward_loss_shooting += h.mse(reward_pred, reward[j])
-            # reward_loss += reward_loss_shooting / (shoot_count + 1)
-        similarity_loss += self.similarity_loss(zs_query, zs_key).reshape(self.cfg.horizon, self.cfg.batch_size,
-                                                                          -1).sum(dim=0)  # (batch_size, )
+            rho = (self.cfg.rho ** t)
+            reward_loss += rho * (h.mse(reward_pred, reward[t]))
+            value_loss += rho * (h.mse(Q1, td_target) + h.mse(Q2, td_target))
+            priority_loss += rho * (h.l1(Q1, td_target) + h.l1(Q2, td_target))
+
+        consistency_loss += self.consistency_loss(online_next_zs, next_zs.detach())
+        similarity_loss += self.similarity_loss(zs_query, zs_key).reshape(self.cfg.horizon, self.cfg.batch_size, -1).sum(dim=0)  # (batch_size, )
 
         # Optimize model
         total_loss = self.cfg.similarity_coef * similarity_loss.clamp(max=1e4) + \
                      self.cfg.reward_coef * reward_loss.clamp(max=1e4) + \
                      self.cfg.value_coef * value_loss.clamp(max=1e4)
+        # total_loss = self.cfg.consistency_coef * consistency_loss.clamp(max=1e4) + \
+        #              self.cfg.reward_coef * reward_loss.clamp(max=1e4) + \
+        #              self.cfg.value_coef * value_loss.clamp(max=1e4)
         weighted_loss = (total_loss * weights).mean()
         weighted_loss.register_hook(lambda grad: grad * (1 / self.cfg.horizon))
         weighted_loss.backward()
@@ -440,6 +412,4 @@ class TdICemSimDssm:
                 'total_loss': float(total_loss.mean().item()),
                 'weighted_loss': float(weighted_loss.mean().item()),
                 'grad_norm': float(grad_norm),
-                # 'intrinsic_batch_reward_mean': intrinsic_rewards.mean().item(),
-                # 'current_explore_coef': self.explore_coef,
                 'mixture_coef': self.mixture_coef}

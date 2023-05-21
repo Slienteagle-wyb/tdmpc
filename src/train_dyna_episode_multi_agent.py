@@ -14,10 +14,11 @@ import time
 import random
 from pathlib import Path
 from cfg import parse_cfg
-from tdmpc.envs.env import make_env
-from tdmpc.envs.quad_envs import make_quadrotor_env_multi, make_quadrotor_env_racing
+from envs.env import make_env
+from envs.quad_envs import make_quadrotor_env_multi, make_quadrotor_env_racing
 from algorithm.tdmpc_similarity import TDMPCSIM
 from algorithm.tdsim_drnn_racing import TdMpcSimDssmR
+from algorithm.tdsim_drnn_racing_extend_vis import TdMpcSimDssmRE
 from algorithm.helper import Episode, RolloutBuffer
 from gym_art.quadrotor_single.quad_utils import *
 import logger
@@ -156,24 +157,35 @@ def test_gym_art_multi_agent(cfg):
     assert torch.cuda.is_available()
     set_seed(cfg.seed)
     work_dir = Path().cwd() / __LOGS__ / cfg.task / cfg.modality / cfg.exp_name / str(cfg.seed)
-    # env, agent, buffer = make_quadrotor_env_multi(cfg), TdMpcSimDssm(cfg), RolloutBuffer(cfg)
-    env, agent, buffer = make_quadrotor_env_racing(cfg), TdMpcSimDssmR(cfg), RolloutBuffer(cfg)
+    # env, agent = make_quadrotor_env_multi(cfg), TDMPCSIM(cfg)
+    env, agent = make_quadrotor_env_racing(cfg), TdMpcSimDssmR(cfg)
 
     # load the model for test
     fp = os.path.join(work_dir, cfg.model_path)
     agent.load(fp)
     print('have loaded the model from {}'.format(fp))
-    policy = DummyPolicy()
     episode_rewards = []
-    num_rollouts = 10
+    num_rollouts = 100
+
     plot_thrusts = False
     plot_step = None
     plot_obs = False
     obs_sequences = []
+    states_sequences = []
+    success_count = 0
 
+    complete_rate, mean_traverse_ticks = [], []
     start_time = time.time()
     for rollout_id in tqdm.tqdm(range(num_rollouts)):
         s = env.reset()
+        # state_vector = np.array([-0.42987101, -0.77403266,  2.96746542, -0.08645287,  0.17858871,  0.22283107,
+        #                         -0.79556279, -0.60559172,  0.01839875,  0.55357989, -0.738906,  -0.3841448,
+        #                          0.24622985, -0.29542613,  0.92308952,  1.16169465,  1.00874519,  0.20087534])
+        #
+        # env.envs[0].dynamics.set_state(state_vector[0:3], state_vector[3:6],
+        #                                state_vector[6:15].reshape(3, 3), state_vector[15:18])
+        # state_vector = env.envs[0].dynamics.state_vector()
+        # print('the initial state is {}'.format(state_vector), 'the goal is {}'.format(env.envs[0].goal))
         done = False
         step_count, r_sum = 0, 0
         observations = []
@@ -192,14 +204,14 @@ def test_gym_art_multi_agent(cfg):
                 action = action.squeeze().detach()
             else:
                 # online planing policy
-                hidden = agent.model.init_hidden_state(batch_size=1, device='cuda')
-                action, _, _ = agent.plan(s, hidden, eval_mode=True, step=0, t0=step_count == 0)
-                # action = np.random.random(4) * 2 - 1
-                # action = policy.step(s)
-            s, reward, done, info = env.step(action.squeeze().cpu().numpy())
-            # dist_to_goal = np.linalg.norm(env.envs[0].dynamics.pos - env.envs[0].goal)
-            # print(dist_to_goal)
-            # print(s[0:3], env.envs[0].dynamics.pos, env.envs[0].goal)
+                # hidden = agent.model.init_hidden_state(batch_size=1, device='cuda')
+                # action, _, _ = agent.plan(s, hidden, eval_mode=True, step=0, t0=step_count == 0)
+
+                # action = agent.plan(s, eval_mode=True, step=0, t0=step_count == 0)
+
+                action = np.random.random(4) * 2 - 1
+
+            s, reward, done, info = env.step(action)
             r_sum += reward
             # actions.append((action.cpu().numpy() + np.ones(4)) * 0.5)
             actions.append(action)
@@ -207,7 +219,13 @@ def test_gym_art_multi_agent(cfg):
             observations.append(s)
             # record the relative pos to target and attitude represented by quaternion
             quat = R2quat(rot=s[6:15])
-            csv_data.append(np.concatenate([np.array([1.0 / env.control_freq * step_count]), s[0:3], quat]))
+            # state_vector = env.envs[0].dynamics.state_vector()
+            # goal = env.envs[0].goal
+            # dist = np.linalg.norm(state_vector[0:3] - goal[0:3])
+            # csv_data.append(np.concatenate([np.array([1.0 / env.control_freq * step_count]), s[0:3], quat]))
+            state_vector = env.env.dynamics.state_vector()
+            goal = np.concatenate(env.preceding_goals_cartesian)
+            csv_data.append(np.concatenate([np.array([1.0 / env.control_freq * step_count]), state_vector, goal]))
 
             if plot_step is not None and step_count % plot_step == 0:
                 plt.clf()
@@ -223,9 +241,19 @@ def test_gym_art_multi_agent(cfg):
                 plt.draw()
 
             step_count += 1
-        print(r_sum, step_count)
-        observation_traj = np.array(observations, dtype=np.float32)
-        obs_sequences.append(observation_traj)
+        print(r_sum, step_count, info['complete_rate'])
+        if step_count == 1000:
+            observation_traj = np.array(observations, dtype=np.float32)
+            obs_sequences.append(observation_traj)
+
+
+        complete_rate.append(np.ceil(6 * info['complete_rate']))
+        mean_traverse_ticks.append(info['mean_traverse_ticks'])
+        if info['complete_rate'] == 1:
+            states_traj = np.array(csv_data, dtype=np.float32)
+            states_sequences.append(states_traj)
+            success_count += 1
+            print('append a successful trajectory, the total is {}'.format(success_count))
 
         episode_rewards.append(r_sum)
         # print(np.nanmean(episode_rewards))
@@ -245,12 +273,12 @@ def test_gym_art_multi_agent(cfg):
         print("Total time: ", time.time() - start_time)
 
     # save the pkls
-    work_dir = f'/home/yibo/spaces/racing_traj/z_score'
+    # work_dir = f'/home/yibo/spaces/set_points'
     if not os.path.exists(work_dir):
         os.makedirs(work_dir)
-    with open(os.path.join(work_dir, 'obs_sequences6_rep18_1000_test.pkl'), 'wb') as f:
-        pickle.dump(obs_sequences, f)
-    print('saved the obs sequences')
+    with open(os.path.join(work_dir, 'flat_success_state_sequences_test1.pkl'), 'wb') as f:
+        pickle.dump(states_sequences, f)
+    print('saved the obs sequences, the complete gates are {}'.format(np.sum(complete_rate)))
 
 
 if __name__ == '__main__':

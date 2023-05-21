@@ -340,7 +340,7 @@ class TDMPCSIM():
             priority_loss += rho * (h.l1(Q1, td_target) + h.l1(Q2, td_target))
 
         similarity_loss = self.similarity_loss(zs_query, zs_key)
-        similarity_loss = similarity_loss.reshape(self.cfg.horizon, self.cfg.batch_size, -1).mean(dim=0)  # (batch_size, )
+        similarity_loss = similarity_loss.reshape(self.cfg.horizon, self.cfg.batch_size, -1).sum(dim=0)  # (batch_size, )
 
         # Optimize model
         total_loss = self.cfg.similarity_coef * similarity_loss.clamp(max=1e4) + \
@@ -418,12 +418,12 @@ class TDMPCSIM():
             # Losses
             rho = (self.cfg.rho ** t)
             # consistency_loss += rho * torch.mean(h.mse(z, next_z), dim=1, keepdim=True)
-            reward_loss += rho * h.mse(50*reward_pred, 50*reward[t])
+            reward_loss += rho * h.mse(reward_pred, reward[t])
             value_loss += rho * (h.mse(Q1, td_target) + h.mse(Q2, td_target))
             priority_loss += rho * (h.l1(Q1, td_target) + h.l1(Q2, td_target))
 
         similarity_loss = self.similarity_loss(zs_query, zs_key)
-        similarity_loss = similarity_loss.reshape(self.cfg.horizon, self.cfg.batch_size, -1).mean(dim=0)  # (batch_size, )
+        similarity_loss = similarity_loss.reshape(self.cfg.horizon, self.cfg.batch_size, -1).sum(dim=0)  # (batch_size, )
 
         # Optimize model
         total_loss = self.cfg.similarity_coef * similarity_loss.clamp(max=1e4) + \

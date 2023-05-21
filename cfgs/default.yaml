@@ -1,5 +1,5 @@
 # environment
-task: racing-single
+task: hopper-hop
 modality: 'state'
 action_repeat: ???
 discount: 0.99
@@ -8,12 +8,13 @@ train_steps: 500000/${action_repeat}
 
 # planning
 iterations: 6
-num_samples: 512
-num_elites: 64
+num_samples: 256 # 256 for icem, 512 default
+num_elites: 32  # 32 for icem, 64 default
 mixture_coef: 0.5  # 0.05
 min_std: 0.05
 temperature: 0.5
 momentum: 0.1
+init_std: 0.5
 
 # icem
 factor_decrease_num: 1.25
@@ -25,26 +26,38 @@ noise_beta: 0.5
 # learning
 batch_size: 512
 max_buffer_size: 1000000
-horizon: 5
+horizon: 6
+warmup_len: 0
 similarity_horizon: 1
 reward_coef: 0.5  # 0.2 for mujoco, 0.5 for dm_control
 value_coef: 0.1  # 0.1 default
-consistency_coef: 0.4  # 2.0 for mlp, 0.4 for drnn
-similarity_coef: 0.2  # 0.2 drnn, 1.0 mlp
+consistency_coef: 0.5  # 2.0 for mlp, 0.4 for drnn
+similarity_coef: 1.0  # 0.2 drnn, 1.0 mlp
 intrinsic_reward_coef: 0.5  # 0.002 for quad, 0.5 for dm_control
 rho: 1.0
 kappa: 0.1
-std_schedule: linear(0.5, ${min_std}, 25000, 0)  # duration 25000 train step
-horizon_schedule: linear(1, ${horizon}, 25000, 0)
-explore_schedule: linear(0, ${intrinsic_reward_coef}, 25000, 5000)
-regularization_schedule: linear(0.05, ${mixture_coef}, 1, 5000)
-demo_schedule: linear(0.95, 0.25, 48000, 32000)
 per_alpha: 0.6
 per_beta: 0.4
 grad_clip_norm: 10
-seed_steps: 5000
 update_freq: 2
 tau: 0.01
+std_schedule: linear(0.5, ${min_std}, 25000, 0)  # duration 25000 train step
+horizon_schedule: linear(2, ${horizon}, 25000, 0)
+regularization_schedule: linear(0.05, ${mixture_coef}, 1, 5000)
+seed_steps: 5000
+explore_schedule: linear(0, ${intrinsic_reward_coef}, 25000, 5000)
+
+# finetune
+pretrained_seed: 1932  # the seed of pretrained model
+freeze_encoder: false
+demo_schedule: linear(0.95, 0.25, 30000, 20000)
+
+# cql
+cql_n_actions: 10
+cql_tmp: 1.0
+cql_min_q_weight: 1.0  # 1.0
+cql_target_action_gap: 10 # 10.0
+alpha_lr: 1e-4
 
 # optim
 lr: 1e-3
@@ -55,8 +68,8 @@ optim_id: 'adamw'
 weight_decay: 0.0
 
 # architecture
-enc_dim: 256
-mlp_dim: 512
+enc_dim: 256  # 256
+mlp_dim: 512  # 512
 latent_dim: 50  # 50
 hidden_dim: 128  # 128
 norm_cell: true
@@ -65,12 +78,10 @@ norm_cell: true
 use_wandb: true
 wandb_project: MoPAC
 wandb_entity: Slientea98
-wandb_exp_name: 0330_quad_racing_similarity_rho1.0_r0.5_v0.1_s0.2_horizon5_gates6_viz0_500k_z_score_norm_dist_progress_threshold0.96_ps_
+wandb_exp_name: 0521_sim(drnn_no_shoot)_icem_color0.5_s1.0_r0.5_v0.1_rho1.0_mix0.5_horizon2/6_explore0.5(5/25)
 
 # mis
-seed: 0
-pretrained_seed: 35  # the seed of pretrained model
-freeze_encoder: false
+seed: 1231
 env_horizon: 0  # 0 if normal transition
 dream_horizon : 1
 dream_trace: 8

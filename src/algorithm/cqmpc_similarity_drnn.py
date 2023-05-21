@@ -1,3 +1,4 @@
+import einops
 import numpy as np
 import torch
 import torch.nn as nn
@@ -9,7 +10,6 @@ from rlpyt.ul.algos.utils.scheduler_factory import create_scheduler
 import src.algorithm.helper as h
 from src.models.gru_dyna import DGruDyna, OneStepDyna
 from gym.wrappers.normalize import RunningMeanStd
-from collections import deque
 
 
 class DSSM(nn.Module):
@@ -59,11 +59,6 @@ class DSSM(nn.Module):
         reward_pred = self._reward(hidden)
         return z, hidden, reward_pred
 
-    def open_loop_next(self, z, a, h_prev):
-        z, hidden = self._dynamics(z, a, h_prev)
-        reward_pred = self._reward(hidden)
-        return z, hidden, reward_pred
-
     def init_hidden_state(self, batch_size, device):
         return self._dynamics.init_hidden_state(batch_size, device)
 
@@ -72,8 +67,13 @@ class DSSM(nn.Module):
         mu = torch.tanh(self._pi(z))
         if std > 0:
             std = torch.ones_like(mu) * std
-            return h.TruncatedNormal(mu, std).sample(clip=0.3)
+            return h.TruncatedNormal(mu, std).sample(clip=0.3)[0]
         return mu
+
+    def pi_log_prob(self, z, std=0.05):
+        mu = torch.tanh(self._pi(z))
+        std = torch.ones_like(mu) * std
+        return h.TruncatedNormal(mu, std).sample(clip=0.3)
 
     def Q(self, z, a):
         """Predict state-action value (Q)."""
@@ -84,7 +84,7 @@ class DSSM(nn.Module):
         return self._predictor(z)
 
 
-class TdMpcSimDssm:
+class CqMpcSimDssm:
     """Implementation of TD-MPC learning + inference."""
 
     def __init__(self, cfg):
@@ -94,19 +94,14 @@ class TdMpcSimDssm:
         self.mixture_coef = h.linear_schedule(self.cfg.regularization_schedule, 0)
         self.model = DSSM(cfg).cuda()
         self.model_target = deepcopy(self.model)
-        # self.q_params = list(self.model._Q1.parameters()) + list(self.model._Q2.parameters())
-        if self.cfg.plan2expl:
-            self.forward_ensembles = [OneStepDyna(cfg).cuda() for _ in range(cfg.num_ensembles)]
-            self.one_step_model_params = []
-            for _ in self.forward_ensembles:
-                self.one_step_model_params += list(_.parameters())
-        self.dyna_aug = h.RandomAdditiveGaussianNoiseAug(cfg, scale=0.1)
+
+        self.aug = h.RandomShiftsAug(cfg)
         self.model.eval()
         self.model_target.eval()
         self.reward_rms = RunningMeanStd()
         self.intrinsic_reward_rms = RunningMeanStd()
         self.plan_horizon = 1
-        self.memory_latents = deque(maxlen=self.cfg.warmup_len)
+        self.log_alpha_prime = torch.zeros(1, requires_grad=True, device=cfg.device)
 
         total_epochs = int(cfg.train_steps / cfg.episode_length)
         self._optim_initialize(total_epochs)
@@ -116,6 +111,7 @@ class TdMpcSimDssm:
                                       lr=self.cfg.lr)
         self.pi_optim = create_optimizer(model=self.model._pi, optim_id=self.cfg.optim_id,
                                          lr=self.cfg.pi_lr)
+        self.alpha_prime_optim = torch.optim.AdamW([self.log_alpha_prime], lr=self.cfg.alpha_lr)
 
     def state_dict(self):
         """Retrieve state dict of TOLD model, including slow-moving target network."""
@@ -137,48 +133,11 @@ class TdMpcSimDssm:
         """Estimate value of a trajectory starting at latent state z and executing given actions."""
         G, discount = 0, 1
         for t in range(self.plan_horizon):
-            z, hidden, reward = self.model.open_loop_next(z, actions[t], hidden)
+            z, hidden, reward = self.model.next(z, actions[t], hidden)
             G += discount * reward
             discount *= self.cfg.discount
         G += discount * torch.min(*self.model.Q(z, self.model.pi(z, self.cfg.min_std)))
         return G.nan_to_num_(0), float(reward.mean().item())
-
-    @torch.no_grad()
-    def plan2explore(self, z_expl, action_expl, hidden_expl):
-        G, G_expl, discount = 0, 0, 1
-        intrinsic_reward, reward_compensate = 0, 0
-        for t in range(self.plan_horizon):
-            z_expl, hidden_expl, reward = self.model.next(z_expl, action_expl[t], hidden_expl)
-            pred_embedding = []
-            for idx in range(len(self.forward_ensembles)):
-                pred_embedding.append(self.forward_ensembles[idx](hidden_expl, action_expl[t]).mean)
-            pred_embedding = torch.stack(pred_embedding, dim=0)  # [num_ensembles, batch_size, z_dim]
-            var = torch.var(pred_embedding, dim=0)  # [batch_size, z_dim]
-            intrinsic_reward = torch.mean(var, dim=-1).cpu().data.numpy()  # [batch_size]
-            intrinsic_reward_mean = np.mean(intrinsic_reward)
-            intrinsic_reward_var = np.var(intrinsic_reward)
-            self.intrinsic_reward_rms.update_from_moments(intrinsic_reward_mean, intrinsic_reward_var, 1)
-            intrinsic_reward /= np.sqrt(self.reward_rms.var)
-            reward_threshold = self.reward_rms.mean / np.sqrt(self.reward_rms.var)
-            intrinsic_reward = np.maximum(intrinsic_reward - reward_threshold, 0)
-            intrinsic_reward = torch.from_numpy(intrinsic_reward).cuda().unsqueeze(-1)
-            # calculate the running mean and std of pred reward
-            # reward_mean = torch.mean(reward).cpu().data.numpy()
-            # reward_var = torch.var(reward).cpu().data.numpy()
-            # self.reward_rms.update_from_moments(reward_mean, reward_var, 1)
-            # reward /= torch.tensor(np.sqrt(self.reward_rms.var)).cuda()
-            # calculate the predicted return to go
-            G += discount * reward
-            G_expl += discount * (0.5 * intrinsic_reward)
-            # reward_compensate += discount * 0.5 * torch.mean(intrinsic_reward)
-            discount *= self.cfg.discount
-        G += discount * torch.min(*self.model.Q(z_expl, self.model.pi(z_expl, self.cfg.min_std)))
-
-        # calculate the intrinsic reward for logging
-        log_intrinsic_reward = intrinsic_reward.squeeze()
-        mask = log_intrinsic_reward != 0
-        intrinsic_reward_mean = log_intrinsic_reward[mask].mean().nan_to_num_(0).item()
-        return G.nan_to_num_(0), G_expl, float(intrinsic_reward_mean), float(reward.mean().item())
 
     @torch.no_grad()
     def plan(self, obs, hidden, eval_mode=False, step=None, t0=True):
@@ -186,7 +145,7 @@ class TdMpcSimDssm:
         plan_metrics = {'intrinsic_reward_mean': 0.0, 'external_reward_mean': 0.0, 'current_std': 0.0}
 
         if step < self.cfg.seed_steps and not eval_mode:
-            return torch.empty(self.cfg.action_dim, dtype=torch.float32, device=self.device).uniform_(-1, 1), plan_metrics
+            return torch.empty(self.cfg.action_dim, dtype=torch.float32, device=self.device).uniform_(-1, 1), None, plan_metrics
 
         # Sample policy trajectories
         obs = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
@@ -195,20 +154,17 @@ class TdMpcSimDssm:
             self.plan_horizon = horizon
         self.mixture_coef = h.linear_schedule(self.cfg.regularization_schedule, step)
         num_pi_trajs = int(self.mixture_coef * self.cfg.num_samples)
-        for t in range(len(self.memory_latents)):
-            z, a = self.memory_latents[t]
-            _, hidden, _ = self.model.next(z, a, hidden)
-        z_in = self.model.h(obs)
-
         if num_pi_trajs > 0:
             pi_actions = torch.empty(self.plan_horizon, num_pi_trajs, self.cfg.action_dim, device=self.device)
-            z_pi = z_in.repeat(num_pi_trajs, 1)
+            z = self.model.h(obs).repeat(num_pi_trajs, 1)
             hidden_pi = hidden.repeat(num_pi_trajs, 1)
             for t in range(self.plan_horizon):
-                pi_actions[t] = self.model.pi(z_pi, self.cfg.min_std)
-                z_pi, hidden_pi, _ = self.model.open_loop_next(z_pi, pi_actions[t], hidden_pi)
+                pi_actions[t] = self.model.pi(z, self.cfg.min_std)
+                z, hidden_pi, _ = self.model.next(z, pi_actions[t], hidden_pi)
 
         # Initialize state and parameters
+        z = self.model.h(obs).repeat(self.cfg.num_samples + num_pi_trajs, 1)
+        hidden_plan = hidden.repeat(self.cfg.num_samples + num_pi_trajs, 1)
         mean = torch.zeros(self.plan_horizon, self.cfg.action_dim, device=self.device)
         std = 2 * torch.ones(self.plan_horizon, self.cfg.action_dim, device=self.device)
         if not t0 and hasattr(self, '_prev_mean'):
@@ -220,21 +176,16 @@ class TdMpcSimDssm:
             actions = torch.clamp(mean.unsqueeze(1) + std.unsqueeze(1) * \
                                   torch.randn(self.plan_horizon, self.cfg.num_samples, self.cfg.action_dim, device=std.device),
                                   -1, 1)
-            z_plan = z_in.repeat(self.cfg.num_samples, 1)
-            hidden_plan = hidden.repeat(self.cfg.num_samples, 1)
             if num_pi_trajs > 0:
-                num_pi_trajs_sampled = int(num_pi_trajs)
-                actions = torch.cat([actions, pi_actions[:, :num_pi_trajs_sampled]], dim=1)
-                z_plan = z_in.repeat(self.cfg.num_samples + num_pi_trajs_sampled, 1)
-                hidden_plan = hidden.repeat(self.cfg.num_samples + num_pi_trajs_sampled, 1)
+                actions = torch.cat([actions, pi_actions], dim=1)
 
             # Compute elite actions
             if self.cfg.plan2expl and not eval_mode and i < 6:
-                value, rewards_expl, intrinsic_reward_mean, reward_mean = self.plan2explore(z_plan, actions)
+                value, rewards_expl, intrinsic_reward_mean, reward_mean = self.plan2explore(z, actions, hidden_plan)
                 value += rewards_expl
                 elite_idxs = torch.topk(value.squeeze(1), self.cfg.num_elites, dim=0).indices
             else:
-                value, reward_mean = self.estimate_value(z_plan, actions, hidden_plan)
+                value, reward_mean = self.estimate_value(z, actions, hidden_plan)
                 elite_idxs = torch.topk(value.squeeze(1), self.cfg.num_elites, dim=0).indices
 
             elite_value, elite_actions = value[elite_idxs], actions[:, elite_idxs]  # select action of high value
@@ -257,14 +208,14 @@ class TdMpcSimDssm:
         a = mean
         if not eval_mode:
             a += std * torch.randn(self.cfg.action_dim, device=std.device)
-        # store current latent and actions tuple for history compression
-        self.memory_latents.append((z_in, a.unsqueeze(0)))
+        # step the model to calculate the next hidden state
+        z, hidden, _ = self.model.next(z[0:1], a.unsqueeze(0), hidden)
 
         plan_metrics.update({'intrinsic_reward_mean': intrinsic_reward_mean,
                              'external_reward_mean': reward_mean,
                              'current_std': std.mean().item()})
 
-        return a, plan_metrics
+        return a, hidden, plan_metrics
 
     def update_pi(self, zs):
         """Update policy using a sequence of latent states."""
@@ -285,55 +236,45 @@ class TdMpcSimDssm:
         self.model.track_q_grad(True)
         return pi_loss.item()
 
-    def analytic_update_pi(self, z, a):
+    def cql_loss(self, z, next_z, q1, q2):
         """
-        Update policy via the analytic gradient back propagate through the learned model.
-        It also should note that the parameters of model is frozen during the update of pi.
-        """
-        self.pi_optim.zero_grad(set_to_none=True)
-        self.model.track_model_grad(False)
-        reward_sum, discount = 0, 1
-        pi_loss = 0
-        horizon = np.clip(self.plan_horizon, 1, 3)
-        hidden = self.model.init_hidden_state(z.shape[0], z.device)
-        for t in range(horizon):
-            rho = 0.5 ** t
-            z, hidden, reward_pred = self.model.next(z, a, hidden)
-            a = self.model.pi(z, self.cfg.min_std)
-            q_estimate = torch.min(*self.model_target.Q(z, a))
-            reward_sum += reward_pred * discount
-            discount *= self.cfg.discount
-            pi_loss += -rho * (reward_sum + discount * q_estimate).mean()
-        pi_loss /= horizon
-
-        pi_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model._pi.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
-        self.pi_optim.step()
-        self.model.track_model_grad(True)
-        return pi_loss.item()
-
-    def update_q(self, z):
-        """
-        samples for the bellman update is generated by learned model in a MBPO style
-        this operation is assumed to improve the UTD ratio to boost the off-policy performance
+        update the q function using the conservative regularize
         """
         # rollout the model to get the next latent state
-        q_loss = 0
-        self.q_optim.zero_grad(set_to_none=True)
-        hidden = self.model.init_hidden_state(z.shape[0], z.device)
-        for i in range(self.plan_horizon):
-            a = self.model.pi(z.detach(), self.cfg.min_std)
-            q1, q2 = self.model.Q(z.detach(), a)
-            z, hidden, reward = self.model.next(z, a, hidden)
-            with torch.no_grad():
-                td_target = self._td_target(z, reward)
-            q_loss += (h.mse(q1, td_target, reduce=True) + h.mse(q2, td_target, reduce=True))
+        batch_size = z.shape[0]
+        num_repeat = self.cfg.cql_n_actions
+        z = z.unsqueeze(1).repeat(1, num_repeat, 1).view(batch_size * num_repeat, -1)
+        next_z = next_z.unsqueeze(1).repeat(1, num_repeat, 1).view(batch_size * num_repeat, -1)
+        # prepare action query from random uniform dist and pi policy
+        with torch.no_grad():
+            cql_rand_actions = torch.FloatTensor(int(batch_size*num_repeat), self.cfg.action_dim).uniform_(-1, 1).to(self.device)
+            cql_pi_actions, cql_pi_log_prob = self.model.pi_log_prob(z, std=self.cfg.min_std)
+            cql_next_pi_actions, cql_next_pi_log_prob = self.model.pi_log_prob(next_z, std=self.cfg.min_std)
+        # calculate the estimated q values
+        cql_q1_rand, cql_q2_rand = self.model.Q(z, cql_rand_actions.detach())
+        cql_q1_rand, cql_q2_rand = cql_q1_rand.reshape(batch_size, num_repeat, -1), cql_q2_rand.reshape(batch_size, num_repeat, -1)
+        cql_q1_pi_actions, cql_q2_pi_actions = self.model.Q(z, cql_pi_actions.detach())
+        cql_q1_pi_actions, cql_q2_pi_actions = cql_q1_pi_actions.reshape(batch_size, num_repeat, -1), cql_q2_pi_actions.reshape(batch_size, num_repeat, -1)
+        cql_q1_next_pi_actions, cql_q2_next_pi_actions = self.model.Q(z, cql_next_pi_actions.detach())
+        cql_q1_next_pi_actions, cql_q2_next_pi_actions = cql_q1_next_pi_actions.reshape(batch_size, num_repeat, -1), cql_q2_next_pi_actions.reshape(batch_size, num_repeat, -1)
 
-        q_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.q_params, self.cfg.grad_clip_norm, error_if_nonfinite=False)
-        self.q_optim.step()
-        q_loss_mean = q_loss.item() / self.plan_horizon
-        return q_loss_mean
+        cql_q1_cats = torch.cat([cql_q1_rand, cql_q1_pi_actions, cql_q1_next_pi_actions], dim=1)
+        cql_q2_cats = torch.cat([cql_q2_rand, cql_q2_pi_actions, cql_q2_next_pi_actions], dim=1)
+
+        cql_q1_ood = torch.logsumexp(cql_q1_cats / self.cfg.cql_tmp, dim=1).mean() * self.cfg.cql_min_q_weight * self.cfg.cql_tmp
+        cql_q2_ood = torch.logsumexp(cql_q2_cats / self.cfg.cql_tmp, dim=1).mean() * self.cfg.cql_min_q_weight * self.cfg.cql_tmp
+
+        cql_q1_diff = (cql_q1_ood - q1.mean()) * self.cfg.cql_min_q_weight
+        cql_q2_diff = (cql_q2_ood - q2.mean()) * self.cfg.cql_min_q_weight
+
+        alpha_prime = torch.clamp(torch.exp(self.log_alpha_prime), min=0.0, max=1000000.0)
+        cql_min_q1_loss = alpha_prime * (cql_q1_diff - self.cfg.cql_target_action_gap)
+        cql_min_q2_loss = alpha_prime * (cql_q2_diff - self.cfg.cql_target_action_gap)
+
+        cql_min_loss = cql_min_q1_loss + cql_min_q2_loss
+        alpha_prime_loss = 0.5 * (-cql_min_q1_loss - cql_min_q2_loss)
+
+        return cql_min_loss, alpha_prime_loss
 
     @torch.no_grad()
     def _td_target(self, next_z, reward):
@@ -351,55 +292,16 @@ class TdMpcSimDssm:
         keys_norm = F.normalize(keys, dim=-1, p=2)
         return 2.0 - 2.0 * (queries_norm * keys_norm).sum(dim=-1)  # (cfg.horizon*batch_size, )
 
-    def consistency_loss(self, z_pred, z_target):
-        seg_len = len(z_pred)
-        z_pred = torch.cat(z_pred, dim=0)  # (cfg.horizon*batch_size, latent_dim)
-        z_target = torch.cat(z_target, dim=0)
-        seg_loss = torch.mean(h.mse(z_pred, z_target), dim=1, keepdim=True)
-        seg_loss_mean = seg_loss.reshape(seg_len, self.cfg.batch_size, -1).mean(dim=0)
-        return seg_loss_mean
-
     @torch.no_grad()
-    def model_rollout(self, z, actions, init_hidden):
+    def model_rollout(self, z, actions):
         T, B = actions.shape[:2]
         zs_latent = []
-        hidden = init_hidden
+        hidden = self.model.init_hidden_state(z.shape[0], z.device)
         for t in range(T):
             z, hidden, _ = self.model.next(z, actions[t], hidden)
             zs_latent.append(z)
         zs_latent = torch.stack(zs_latent, dim=0)
-        return zs_latent, hidden
-
-    @torch.no_grad()
-    def intrinsic_rewards(self, obs, next_obses, actions):
-        zs_target = self.model_target.h(next_obses)
-        zs_traj = self.model.h(torch.cat([obs.unsqueeze(0), next_obses], dim=0))
-        model_uncertainty = torch.zeros((self.cfg.horizon+1, self.cfg.horizon+1, self.cfg.batch_size, 1), requires_grad=False).cuda()
-        hidden = self.model.init_hidden_state(self.cfg.batch_size, obs.device)
-        for i in range(self.cfg.warmup_len):
-            z_pred, hidden, reward_pred = self.model.next(zs_traj[i], actions[i], hidden)
-
-        for t in range(self.cfg.warmup_len, self.cfg.horizon+1):
-            end_idx = min(t+self.cfg.similarity_horizon, self.cfg.horizon+1)
-            zs_latent, hidden = self.model_rollout(zs_traj[t], actions[t:end_idx], hidden)
-            lead_dim, T, B, latent_shape = infer_leading_dims(zs_latent, 1)
-            zs_pred = self.model.pred_z(zs_latent.reshape(T*B, *latent_shape))
-            zs_pred = restore_leading_dims(zs_pred, lead_dim, T, B)
-            zs_pred = F.normalize(zs_pred, dim=-1, p=2)
-            target = F.normalize(zs_target[t:end_idx], dim=-1, p=2)
-            partial_pred_loss = 2.0 - 2.0 * (zs_pred * target).sum(dim=-1, keepdim=True)   # (t:t+1, b, 1)
-            model_uncertainty[t][t:end_idx] = partial_pred_loss.detach_()
-
-        intrinsic_reward = torch.sum(model_uncertainty, dim=0).cpu().data.numpy()  # (t+1, b, 1)
-        # intrinsic_reward[0:1] *= int(self.cfg.similarity_horizon)
-        reward_mean = np.mean(intrinsic_reward)
-        reward_std = np.std(intrinsic_reward)
-        self.reward_rms.update_from_moments(reward_mean, reward_std ** 2, 1)
-        intrinsic_reward /= np.sqrt(self.reward_rms.var)
-        reward_threshold = self.reward_rms.mean / np.sqrt(self.reward_rms.var)
-        intrinsic_reward = np.maximum(intrinsic_reward - reward_threshold, 0)
-        intrinsic_reward = torch.from_numpy(intrinsic_reward).cuda()
-        return intrinsic_reward.detach_()
+        return zs_latent
 
     def update(self, replay_buffer, step):
         """Main update function. Corresponds to one iteration of the TOLD model learning."""
@@ -411,63 +313,57 @@ class TdMpcSimDssm:
         self.optim.zero_grad(set_to_none=True)
 
         # Representation
-        # obs, next_obses = self.aug(obs, next_obses)
         z = self.model.h(obs)
-        # next_zs = self.model_target.h(self.aug(obs, next_obses))
+        next_zs = self.model_target.h(next_obses)
         online_next_zs = self.model.h(next_obses)
-        target_next_zs = self.model_target.h(next_obses)
-        # online_next_zs, target_next_zs = self.aug(online_next_zs, target_next_zs)
-        zs_traj = torch.cat([z.unsqueeze(0), online_next_zs], dim=0)
+        # input_zs = torch.cat([z.unsqueeze(0), online_next_zs], dim=0)
+        zs = [z.detach()]  # obs embedding for policy learning
         beliefs = []
 
         similarity_loss, reward_loss, value_loss, priority_loss = 0, 0, 0, 0
+        alpha_prime_total_loss = 0
         hidden = self.model.init_hidden_state(z.shape[0], z.device)
-        zs_query_closed, zs_key_closed = [], []
-
-        z_pred = None
-        for i in range(self.cfg.warmup_len):
-            z_pred, hidden, reward_pred = self.model.next(zs_traj[i], action[i], hidden)
-            z_pred = self.dyna_aug(z_pred)
-            zs_query_closed.append(z_pred)
-            zs_key_closed.append(target_next_zs[i].detach())
-        similarity_loss += self.similarity_loss(zs_query_closed, zs_key_closed).\
-            reshape(self.cfg.warmup_len, self.cfg.batch_size, -1).sum(dim=0)
-        # consistency_loss += self.consistency_loss(zs_query_closed, zs_key_closed)
-
-        # calculate intrinsic reward for exploration
-        explore_coef = h.linear_schedule(self.cfg.explore_schedule, step)
-        intrinsic_rewards = self.intrinsic_rewards(obs, next_obses, action)
-        reward_pi = explore_coef * intrinsic_rewards + reward
-
-        zs_query_open, zs_key_open = [], []
-        z_shoot = zs_traj[self.cfg.warmup_len]
-        hidden_shoot = hidden
-        zs = [z_shoot.detach()]
-        shoot_count = 0
-        for t in range(self.cfg.warmup_len, self.cfg.horizon):
+        for t in range(self.cfg.horizon):
             # Predictions
-            rho = (self.cfg.rho ** shoot_count)
-            Q1, Q2 = self.model.Q(z_shoot, action[t])
-            z_shoot, hidden_shoot, reward_pred = self.model.open_loop_next(z_shoot, action[t], hidden_shoot)
-            z_shoot = self.dyna_aug(z_shoot)
-            zs_query_open.append(z_shoot)
-            zs_key_open.append(target_next_zs[t].detach())
-            zs.append(z_shoot.detach())
+            rho = (self.cfg.rho ** t)
+            zs_query, zs_key = [], []
+            reward_loss_shooting = 0
+            Q1, Q2 = self.model.Q(z, action[t])
+            cql_loss, alpha_prime_loss = self.cql_loss(z, online_next_zs[t], Q1, Q2)
+            z, hidden, reward_pred = self.model.next(z, action[t], hidden)
+            reward_loss_shooting += h.mse(reward_pred, reward[t])
             with torch.no_grad():
-                td_target = self._td_target(online_next_zs[t], reward_pi[t])
-            reward_loss += h.mse(reward_pred, reward[t]) * rho
-            value_loss += (h.mse(Q1, td_target) + h.mse(Q2, td_target)) * rho
-            priority_loss += (h.l1(Q1, td_target) + h.l1(Q2, td_target)) * rho
-        similarity_loss += self.similarity_loss(zs_query_open, zs_key_open).\
-            reshape(self.cfg.horizon - self.cfg.warmup_len, self.cfg.batch_size, -1).sum(dim=0)
-        # consistency_loss += self.consistency_loss(zs_query_open, zs_key_open)
+                td_target = self._td_target(online_next_zs[t], reward[t])
+            bellman_error = h.mse(Q1, td_target) + h.mse(Q2, td_target)
+            value_loss += (bellman_error + cql_loss) * 0.5
+            priority_loss += h.l1(Q1, td_target) + h.l1(Q2, td_target)
+
+            zs_query.append(z)
+            zs_key.append(next_zs[t].detach())
+            zs.append(z.detach())
+            beliefs.append(hidden)  # will be detached internally
+
+            # conduct overshooting for the next states embedding
+            shoot_hidden = torch.clone(hidden)
+            shoot_z = torch.clone(z)
+            shoot_count = 0
+            for j in range(t+1, self.cfg.horizon):
+                shoot_count += 1
+                shoot_z, shoot_hidden, reward_pred = self.model.next(shoot_z, action[j], shoot_hidden)
+                zs_query.append(shoot_z)
+                zs_key.append(next_zs[j].detach())
+                reward_loss_shooting += h.mse(reward_pred, reward[j])
+            reward_loss += reward_loss_shooting / (shoot_count+1)
+            similarity_loss += self.similarity_loss(zs_query, zs_key).reshape(self.cfg.horizon-t, self.cfg.batch_size, -1).sum(dim=0)  # (batch_size, )
 
         # Optimize model
+        self.alpha_prime_optim.zero_grad()
+        alpha_prime_loss.backward(retain_graph=True)
+        self.alpha_prime_optim.step()
+
         total_loss = self.cfg.similarity_coef * similarity_loss.clamp(max=1e4) + \
                      self.cfg.reward_coef * reward_loss.clamp(max=1e4) + \
                      self.cfg.value_coef * value_loss.clamp(max=1e4)
-            # self.cfg.consistency_coef * consistency_loss.clamp(max=1e4)
-
         weighted_loss = (total_loss * weights).mean()
         weighted_loss.register_hook(lambda grad: grad * (1 / self.cfg.horizon))
         weighted_loss.backward()
@@ -478,6 +374,7 @@ class TdMpcSimDssm:
 
         # Update policy + target network
         pi_loss = self.update_pi(zs)
+        # pi_loss = self.analytic_update_pi(zs[0], action[0])
         if step % self.cfg.update_freq == 0:
             h.ema(self.model, self.model_target, self.cfg.tau)
 
@@ -486,11 +383,8 @@ class TdMpcSimDssm:
                 'reward_loss': float(reward_loss.mean().item()),
                 'value_loss': float(value_loss.mean().item()),
                 'pi_loss': pi_loss,
-                # 'dreamed_q_loss': dreamed_q_loss,
                 'total_loss': float(total_loss.mean().item()),
                 'weighted_loss': float(weighted_loss.mean().item()),
+                'aplha_prime_loss': float(alpha_prime_loss.item()),
                 'grad_norm': float(grad_norm),
-                # 'current_ensemble_lr': current_ensemble_lr,
-                # 'intrinsic_batch_reward_mean': intrinsic_rewards.mean().item(),
-                # 'current_explore_coef': explore_coef,
                 'mixture_coef': self.mixture_coef}

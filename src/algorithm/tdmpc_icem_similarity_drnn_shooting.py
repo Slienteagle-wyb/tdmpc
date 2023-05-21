@@ -78,7 +78,7 @@ class DSSM(nn.Module):
         return self._predictor(z)
 
 
-class TdICemSimDssm:
+class TdICemSimDssmShooting:
     """Implementation of TD-MPC learning + inference."""
 
     def __init__(self, cfg):
@@ -96,7 +96,6 @@ class TdICemSimDssm:
         self.reward_rms = RunningMeanStd()
 
         self.plan_horizon = 1
-        self.explore_coef = 0
         total_epochs = int(cfg.train_steps / cfg.episode_length)
         self._optim_initialize(total_epochs)
 
@@ -216,7 +215,7 @@ class TdICemSimDssm:
             zs_plan = z.repeat(num_trajs, 1)
             hidden_plan = hidden.repeat(num_trajs, 1)
             # sample actions from the current distribution
-            actions_sampled = self.sample_action_sequence(num_samples, mean, std)
+            actions_sampled = self.sample_mix_action_sequence(num_samples, mean, std)
             if i == self.cfg.iterations - 1:
                 actions_sampled[:, 0] = mean  # use the mean of the last iteration (icem_best-a)
 
@@ -367,18 +366,17 @@ class TdICemSimDssm:
         beliefs = []
 
         # calculate intrinsic reward for exploration
-        self.explore_coef = h.linear_schedule(self.cfg.explore_schedule, step)
+        explore_coef = h.linear_schedule(self.cfg.explore_schedule, step)
         intrinsic_rewards = self.intrinsic_rewards(obs, next_obses, action)
-        reward_pi = self.explore_coef * intrinsic_rewards + reward
+        reward_pi = explore_coef * intrinsic_rewards + reward
 
         similarity_loss, reward_loss, value_loss, priority_loss = 0, 0, 0, 0
         hidden = self.model.init_hidden_state(z.shape[0], z.device)
-        zs_query, zs_key = [], []
         for t in range(self.cfg.horizon):
             # Predictions
             rho = (self.cfg.rho ** t)
-            # zs_query, zs_key = [], []
-            # reward_loss_shooting = 0
+            zs_query, zs_key = [], []
+            reward_loss_shooting = 0
             Q1, Q2 = self.model.Q(z, action[t])
             z, hidden, reward_pred = self.model.next(z, action[t], hidden)
             # z = self.dyna_aug(z)
@@ -386,10 +384,9 @@ class TdICemSimDssm:
             # z = z + dyna_noise
             with torch.no_grad():
                 td_target = self._td_target(online_next_zs[t], reward_pi[t])
-            # reward_loss_shooting += h.mse(reward_pred, reward[t])
-            reward_loss += h.mse(reward_pred, reward[t])
-            value_loss += (h.mse(Q1, td_target) + h.mse(Q2, td_target))
-            priority_loss += (h.l1(Q1, td_target) + h.l1(Q2, td_target))
+            reward_loss_shooting += h.mse(reward_pred, reward[t])
+            value_loss += (h.mse(Q1, td_target) + h.mse(Q2, td_target)) * rho
+            priority_loss += (h.l1(Q1, td_target) + h.l1(Q2, td_target)) * rho
 
             zs_query.append(z)
             # zs_key.append((next_zs[t] + dyna_noise).detach())
@@ -398,22 +395,23 @@ class TdICemSimDssm:
             beliefs.append(hidden)  # will be detached internally
 
             # conduct overshooting for the next states embedding
-            # shoot_hidden = torch.clone(hidden)
-            # shoot_z = torch.clone(z)
-            # shoot_count = 0
-            # for j in range(t + 1, self.cfg.horizon):
-            #     shoot_count += 1
-            #     shoot_z, shoot_hidden, reward_pred = self.model.next(shoot_z, action[j], shoot_hidden)
-            #     shoot_z = self.dyna_aug(shoot_z)
-            #     # dyna_noise = self.aug_generator(shoot_z)
-            #     # shoot_z = shoot_z + dyna_noise
-            #     zs_query.append(shoot_z)
-            #     # zs_key.append((next_zs[j] + dyna_noise).detach())
-            #     zs_key.append(next_zs[j].detach())
-            #     reward_loss_shooting += h.mse(reward_pred, reward[j])
-            # reward_loss += reward_loss_shooting / (shoot_count + 1)
-        similarity_loss += self.similarity_loss(zs_query, zs_key).reshape(self.cfg.horizon, self.cfg.batch_size,
-                                                                          -1).sum(dim=0)  # (batch_size, )
+            shoot_hidden = torch.clone(hidden)
+            shoot_z = torch.clone(z)
+            shoot_count = 0
+            for j in range(t + 1, self.cfg.horizon):
+                shoot_count += 1
+                shoot_z, shoot_hidden, reward_pred = self.model.next(shoot_z, action[j], shoot_hidden)
+                # shoot_z = self.dyna_aug(shoot_z)
+                # dyna_noise = self.aug_generator(shoot_z)
+                # shoot_z = shoot_z + dyna_noise
+                zs_query.append(shoot_z)
+                # zs_key.append((next_zs[j] + dyna_noise).detach())
+                zs_key.append(next_zs[j].detach())
+                reward_loss_shooting += h.mse(reward_pred, reward[j])
+            reward_loss += reward_loss_shooting / (shoot_count + 1)
+
+            similarity_loss += self.similarity_loss(zs_query, zs_key).reshape(self.cfg.horizon-t, self.cfg.batch_size,
+                                                                              -1).sum(dim=0)  # (batch_size, )
 
         # Optimize model
         total_loss = self.cfg.similarity_coef * similarity_loss.clamp(max=1e4) + \
@@ -440,6 +438,4 @@ class TdICemSimDssm:
                 'total_loss': float(total_loss.mean().item()),
                 'weighted_loss': float(weighted_loss.mean().item()),
                 'grad_norm': float(grad_norm),
-                # 'intrinsic_batch_reward_mean': intrinsic_rewards.mean().item(),
-                # 'current_explore_coef': self.explore_coef,
                 'mixture_coef': self.mixture_coef}

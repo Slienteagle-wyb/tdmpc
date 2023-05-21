@@ -1,10 +1,13 @@
+import random
 import re
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import einops
 from copy import deepcopy
 from torch import distributions as pyd
+from torch.distributions import uniform, normal
 from torch.distributions.utils import _standard_normal
 from rlpyt.ul.models.ul.encoders import DmlabEncoderModelNorm
 
@@ -73,6 +76,7 @@ class TruncatedNormal(pyd.Normal):
         self.low = low
         self.high = high
         self.eps = eps
+        self.standard_normal = pyd.Normal(0, 1)
 
     def _clamp(self, x):
         clamped_x = torch.clamp(x, self.low + self.eps, self.high - self.eps)
@@ -84,6 +88,7 @@ class TruncatedNormal(pyd.Normal):
         eps = _standard_normal(shape,
                                dtype=self.loc.dtype,
                                device=self.loc.device)
+        log_prob = self.standard_normal.log_prob(eps)
         eps *= self.scale
         if clip is not None:
             eps = torch.clamp(eps, -clip, clip)
@@ -179,11 +184,24 @@ def mlp_norm(in_dim, hidden_dim, out_dim, cfg, act_fn=nn.ELU(), norm_type='bn'):
     )
 
 
+def mlp_norm_dyna(in_dim, hidden_dim, out_dim, cfg, act_fn=nn.ELU(), norm_type='bn'):
+    norm1 = init_normalization(2 * hidden_dim, type_id=norm_type, one_d=True)
+    norm2 = init_normalization(hidden_dim, type_id=norm_type, one_d=True)
+    return nn.Sequential(
+        nn.Linear(in_dim, 2 * hidden_dim), norm1, act_fn,
+        nn.Linear(2 * hidden_dim, hidden_dim), norm2, act_fn,
+        nn.Linear(hidden_dim, out_dim)
+    )
+
+
 def q(cfg, act_fn=nn.ELU()):
     """Returns a Q-function that uses Layer Normalization."""
     return nn.Sequential(nn.Linear(cfg.latent_dim + cfg.action_dim, cfg.mlp_dim), nn.LayerNorm(cfg.mlp_dim), nn.Tanh(),
                          nn.Linear(cfg.mlp_dim, cfg.mlp_dim), nn.LayerNorm(cfg.mlp_dim), nn.ELU(),
                          nn.Linear(cfg.mlp_dim, 1))
+    # return nn.Sequential(nn.Linear(cfg.latent_dim + cfg.action_dim, cfg.mlp_dim), nn.LayerNorm(cfg.mlp_dim), nn.Tanh(),
+    #                      nn.Linear(cfg.mlp_dim, cfg.mlp_dim), nn.ELU(),
+    #                      nn.Linear(cfg.mlp_dim, 1))
 
 
 def soft_q(cfg):
@@ -264,6 +282,102 @@ class RandomShiftsAug(nn.Module):
             shifted = shifted.reshape(t, n, c, h, w)
 
         return shifted
+
+
+class RandomAmpScalingAug(nn.Module):
+    """
+    Random amplitude scaling state-based augmentation.
+    Adapted from RAD (reinforcement learning with augmented data)
+    """
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+        self.alpha_set = (0.6, 0.8)
+        self.beta_set = (1.2, 1.4)
+
+    def forward(self, obs, next_obses=None):
+        x = obs
+        if next_obses is not None:
+            x = torch.cat([obs.unsqueeze(0), next_obses], dim=0)
+            traj_len = x.size(0)
+            x = einops.rearrange(x, 't b f -> (t b) f')
+        alpha, beta = random.choice(self.alpha_set), random.choice(self.beta_set)
+        single_scale = torch.rand(x.size(0), 1, device=x.device, dtype=x.dtype) * (beta - alpha) + alpha
+        x = x * single_scale
+        if next_obses is not None:
+            x = einops.rearrange(x, '(t b) f -> t b f', t=traj_len)
+            obs, next_obses = x[0], x[1:]
+            return obs, next_obses
+        return x
+
+
+class RandomDynaAug(nn.Module):
+    """
+    random dynamics model augmentation for state based observations.
+    """
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+        self.noise_dist = uniform.Uniform(low=0.5, high=1.5)
+
+    def forward(self, obs, next_obses):
+        x = torch.cat([obs.unsqueeze(0), next_obses], dim=0)
+        delta_transition = x[1:] - x[:-1]
+        next_obses = x[:-1] + self.noise_dist.sample(delta_transition.shape).to(self.cfg.device) * delta_transition
+        return next_obses
+
+
+class RandomAdditiveGaussianNoiseAug(nn.Module):
+    """
+    random additive gaussian noise augmentation for state based observations.
+    """
+    def __init__(self, cfg, scale=0.1):
+        super().__init__()
+        self.cfg = cfg
+        self.noise_dist = normal.Normal(loc=0.0, scale=scale)
+
+    def forward(self, online_next_obses, target_next_obses=None):
+        noise = self.noise_dist.sample(online_next_obses.shape).to(self.cfg.device)
+        online_next_obses = online_next_obses + noise
+        if target_next_obses is not None:
+            target_next_obses = target_next_obses + noise
+            return online_next_obses, target_next_obses
+        return online_next_obses
+
+
+class RandomAdditiveGaussianNoise(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+        self.noise_dist = normal.Normal(loc=0.0, scale=0.1)
+
+    def forward(self, online_next_obses):
+        noise = self.noise_dist.sample(online_next_obses.shape).to(self.cfg.device).requires_grad_(False)
+        return noise
+
+
+def create_normal_dist(
+    x,
+    std=None,
+    mean_scale=1,
+    init_std=0,
+    min_std=0.1,
+    activation=None,
+    event_shape=None,
+):
+    if std == None:
+        mean, std = torch.chunk(x, 2, -1)
+        mean = mean / mean_scale
+        if activation:
+            mean = activation(mean)
+        mean = mean_scale * mean
+        std = F.softplus(std + init_std) + min_std
+    else:
+        mean = x
+    dist = torch.distributions.Normal(mean, std)
+    if event_shape:
+        dist = torch.distributions.Independent(dist, event_shape)
+    return dist
 
 
 class Episode(object):
