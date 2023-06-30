@@ -21,7 +21,7 @@ factor_decrease_num: 1.25
 shift_elites_over_time: true
 fraction_elites_reused: 0.25
 keep_previous_elites: true
-noise_beta: 0.5
+noise_beta: 2.5
 
 # learning
 batch_size: 512
@@ -35,6 +35,7 @@ consistency_coef: 0.5  # 2.0 for mlp, 0.4 for drnn
 similarity_coef: 1.0  # 0.2 drnn, 1.0 mlp
 intrinsic_reward_coef: 0.5  # 0.002 for quad, 0.5 for dm_control
 rho: 1.0
+td_lambda: 0.4
 kappa: 0.1
 per_alpha: 0.6
 per_beta: 0.4
@@ -78,10 +79,11 @@ norm_cell: true
 use_wandb: true
 wandb_project: MoPAC
 wandb_entity: Slientea98
-wandb_exp_name: 0521_sim(drnn_no_shoot)_icem_color0.5_s1.0_r0.5_v0.1_rho1.0_mix0.5_horizon2/6_explore0.5(5/25)
+wandb_exp_name: 0630_(drnn_no_shoot)_icem_color2.5_rho1.0_explore0.5(5/25)_td_lambda0.4_all_weights_equal
 
 # mis
-seed: 1231
+seed: 4245
+train_interval: 1
 env_horizon: 0  # 0 if normal transition
 dream_horizon : 1
 dream_trace: 8

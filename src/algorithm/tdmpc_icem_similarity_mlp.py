@@ -8,7 +8,6 @@ from copy import deepcopy
 from rlpyt.utils.tensor import infer_leading_dims, restore_leading_dims
 from rlpyt.ul.algos.utils.optim_factory import create_optimizer
 import src.algorithm.helper as h
-from src.models.gru_dyna import DGruDyna
 from gym.wrappers.normalize import RunningMeanStd
 
 
@@ -83,9 +82,7 @@ class TdICemSimMlp:
         self.mixture_coef = h.linear_schedule(self.cfg.regularization_schedule, 0)
         self.model = DSSM(cfg).cuda()
         self.model_target = deepcopy(self.model)
-        # self.aug = h.RandomShiftsAug(cfg)
         self.reward_rms = RunningMeanStd()
-        self.aug = h.RandomAdditiveGaussianNoiseAug(cfg)
 
         self.model.eval()
         self.model_target.eval()
@@ -131,8 +128,8 @@ class TdICemSimMlp:
             noise = colorednoise.powerlaw_psd_gaussian(self.cfg.noise_beta,
                                                        size=(num_samples,
                                                              self.cfg.action_dim,
-                                                             self.cfg.horizon))
-            noise = torch.from_numpy(noise).float().to(self.device).permute(2, 0, 1)[:self.plan_horizon]
+                                                             self.plan_horizon))
+            noise = torch.from_numpy(noise).float().to(self.device).permute(2, 0, 1)
         else:
             noise = torch.randn(self.plan_horizon, num_samples,
                                 self.cfg.action_dim, device=self.device)
@@ -177,7 +174,7 @@ class TdICemSimMlp:
         self.mixture_coef = h.linear_schedule(self.cfg.regularization_schedule, step)
         # initialize mean and std
         mean = torch.zeros(self.plan_horizon, self.cfg.action_dim, device=self.device)
-        std = self.cfg.init_std * torch.ones(self.plan_horizon, self.cfg.action_dim, device=self.device)
+        std = 0.5 * torch.ones(self.plan_horizon, self.cfg.action_dim, device=self.device)
         if not t0 and hasattr(self, '_prev_mean'):
             mean[:-1] = self._prev_mean[1:]
             mean[-1] = self._prev_mean[-1]
@@ -276,6 +273,7 @@ class TdICemSimMlp:
         pi_loss = 0
         for t, z in enumerate(zs):
             a = self.model.pi(z, self.cfg.min_std)
+            # Q = torch.min(*self.model.Q(z, a)) * (self.cfg.rho ** t)
             Q = torch.min(*self.model.Q(z, a))
             pi_loss += -Q.mean()
 
@@ -324,8 +322,8 @@ class TdICemSimMlp:
 
     @torch.no_grad()
     def intrinsic_rewards(self, obs, next_obses, actions):
-        zs_target = self.model_target.h(self.aug(next_obses))
-        z_traj = self.model.h(self.aug(torch.cat([obs.unsqueeze(0), next_obses], dim=0)))
+        zs_target = self.model_target.h(next_obses)
+        z_traj = self.model.h(torch.cat([obs.unsqueeze(0), next_obses], dim=0))
         model_uncertainty = torch.zeros((self.cfg.horizon+1, self.cfg.horizon+1, self.cfg.batch_size, 1), requires_grad=False).cuda()
         for t in range(0, z_traj.shape[0]-1):
             zs_latent = self.model_rollout(z_traj[t], actions[t:t+1])
@@ -354,43 +352,56 @@ class TdICemSimMlp:
         self.optim.zero_grad(set_to_none=True)
 
         # Representation
-        z = self.model.h(self.aug(obs))
-        next_zs = self.model_target.h(self.aug(next_obses))
-        online_next_zs = self.model.h(self.aug(next_obses))
+        z = self.model.h(obs)
+        next_zs = self.model_target.h(next_obses)
+        online_next_zs = self.model.h(next_obses)
         zs = [z.detach()]  # obs embedding for policy learning
-        zs_query, zs_key = [], []
 
         # calculate intrinsic reward for exploration
-        # explore_coef = h.linear_schedule(self.cfg.explore_schedule, step)
-        # intrinsic_rewards = self.intrinsic_rewards(obs, next_obses, action)
-        # reward_pi = explore_coef * intrinsic_rewards + reward
+        explore_coef = h.linear_schedule(self.cfg.explore_schedule, step)
+        intrinsic_rewards = self.intrinsic_rewards(obs, next_obses, action)
+        reward_pi = explore_coef * intrinsic_rewards + reward
 
         similarity_loss, reward_loss, value_loss, priority_loss, consistency_loss = 0, 0, 0, 0, 0
+        zs_query, zs_key = [], []
+
+        # calculate next target q for td_lambda
+        # next_q_values, outputs = [], []
+        # rewards = reward_pi[:self.cfg.horizon]
+        # discounts = torch.ones_like(rewards) * self.cfg.discount
+        # for t, next_z in enumerate(online_next_zs[:self.cfg.horizon]):
+        #     with torch.no_grad():
+        #         next_q_value = torch.min(*self.model_target.Q(next_z, self.model.pi(next_z, self.cfg.min_std)))
+        #     next_q_values.append(next_q_value)
+        # next_q_values = torch.stack(next_q_values, dim=0)
+        # last = next_q_values[-1]
+        # inputs = rewards + discounts * next_q_values * (1 - self.cfg.td_lambda)
+        # for index in reversed(range(next_q_values.shape[0])):
+        #     last = inputs[index] + discounts[index] * last * self.cfg.td_lambda
+        #     outputs.append(last)
+        # td_lambda_targets = torch.stack(list(reversed(outputs)), dim=0)
+
         for t in range(self.cfg.horizon):
+            rho = (self.cfg.rho ** t)
             Q1, Q2 = self.model.Q(z, action[t])
             z, reward_pred = self.model.next(z, action[t])
             with torch.no_grad():
-                td_target = self._td_target(online_next_zs[t], reward[t])
+                td_target = self._td_target(online_next_zs[t], reward_pi[t])
+            # td_target = td_lambda_targets[t]
+            reward_loss += (h.mse(reward_pred, reward[t])) * rho
+            value_loss += (h.mse(Q1, td_target) + h.mse(Q2, td_target)) * rho
+            priority_loss += (h.l1(Q1, td_target) + h.l1(Q2, td_target)) * rho
 
             zs_query.append(z)
             zs_key.append(next_zs[t].detach())
             zs.append(z.detach())
 
-            rho = (self.cfg.rho ** t)
-            reward_loss += rho * (h.mse(reward_pred, reward[t]))
-            value_loss += rho * (h.mse(Q1, td_target) + h.mse(Q2, td_target))
-            priority_loss += rho * (h.l1(Q1, td_target) + h.l1(Q2, td_target))
-
-        consistency_loss += self.consistency_loss(online_next_zs, next_zs.detach())
         similarity_loss += self.similarity_loss(zs_query, zs_key).reshape(self.cfg.horizon, self.cfg.batch_size, -1).sum(dim=0)  # (batch_size, )
 
         # Optimize model
         total_loss = self.cfg.similarity_coef * similarity_loss.clamp(max=1e4) + \
                      self.cfg.reward_coef * reward_loss.clamp(max=1e4) + \
                      self.cfg.value_coef * value_loss.clamp(max=1e4)
-        # total_loss = self.cfg.consistency_coef * consistency_loss.clamp(max=1e4) + \
-        #              self.cfg.reward_coef * reward_loss.clamp(max=1e4) + \
-        #              self.cfg.value_coef * value_loss.clamp(max=1e4)
         weighted_loss = (total_loss * weights).mean()
         weighted_loss.register_hook(lambda grad: grad * (1 / self.cfg.horizon))
         weighted_loss.backward()
@@ -412,4 +423,6 @@ class TdICemSimMlp:
                 'total_loss': float(total_loss.mean().item()),
                 'weighted_loss': float(weighted_loss.mean().item()),
                 'grad_norm': float(grad_norm),
+                'intrinsic_batch_reward_mean': intrinsic_rewards.mean().item(),
+                'current_explore_coef': explore_coef,
                 'mixture_coef': self.mixture_coef}

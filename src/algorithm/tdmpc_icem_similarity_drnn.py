@@ -12,8 +12,9 @@ from gym.wrappers.normalize import RunningMeanStd
 
 
 class DSSM(nn.Module):
-    """Task-Oriented Latent Dynamics (TOLD) model used in TD-MPC."""
-
+    """
+    Task-Oriented Latent Dynamics (TOLD) model used in TD-MPC.
+    """
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
@@ -49,7 +50,6 @@ class DSSM(nn.Module):
             latent_feature, _ = self._encoder(obs)
             latents = restore_leading_dims(latent_feature, lead_dim, T, B)
         else:
-            # obs = h.symlog(obs)
             latents = self._encoder(obs)
         return latents
 
@@ -207,7 +207,7 @@ class TdICemSimDssm:
                 num_samples = max(2 * self.cfg.num_elites, int(num_samples / self.cfg.factor_decrease_num))
                 num_pi_trajs = int(self.mixture_coef * num_samples)
                 assert num_pi_trajs > 0
-            if self.cfg.fraction_elites_reused > 0 and hasattr(self, '_elite_actions'):
+            if self.cfg.fraction_elites_reused > 0 and hasattr(self, '_elite_actions') and not t0:
                 num_elite_trajs = int(self.cfg.fraction_elites_reused * self.cfg.num_elites)
                 num_trajs = num_samples + num_pi_trajs + num_elite_trajs
             else:
@@ -221,7 +221,7 @@ class TdICemSimDssm:
                 actions_sampled[:, 0] = mean  # use the mean of the last iteration (icem_best-a)
 
             # reused the elite actions from previous planning step
-            if i == 0 and self.cfg.shift_elites_over_time and hasattr(self, '_elite_actions'):
+            if i == 0 and self.cfg.shift_elites_over_time and hasattr(self, '_elite_actions') and not t0:
                 num_elite_trajs = int(self.cfg.fraction_elites_reused * self.cfg.num_elites)
                 reused_actions = self._elite_actions[1:, :num_elite_trajs]
                 if extend_horizon:
@@ -270,6 +270,99 @@ class TdICemSimDssm:
                              'current_std': std.mean().item()})
 
         return a, hidden, plan_metrics
+
+    @torch.no_grad()
+    def plan_cem(self, obs, hidden, eval_mode=False, step=None, t0=True):
+        intrinsic_reward_mean, reward_mean = 0, 0
+        plan_metrics = {'external_reward_mean': 0.0, 'current_std': 0.0}
+
+        if step < self.cfg.seed_steps and not eval_mode:
+            return torch.empty(self.cfg.action_dim, dtype=torch.float32,
+                               device=self.device).uniform_(-1, 1), None, plan_metrics
+
+        # Sample policy trajectories
+        obs = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+        horizon = int(min(self.cfg.horizon, h.linear_schedule(self.cfg.horizon_schedule, step)))
+        if horizon != self.plan_horizon and t0:
+            self.plan_horizon = horizon
+        self.mixture_coef = h.linear_schedule(self.cfg.regularization_schedule, step)
+        num_pi_trajs = int(self.mixture_coef * self.cfg.num_samples)
+        if num_pi_trajs > 0:
+            pi_actions = torch.empty(self.plan_horizon, num_pi_trajs, self.cfg.action_dim, device=self.device)
+            z = self.model.h(obs).repeat(num_pi_trajs, 1)
+            hidden_pi = hidden.repeat(num_pi_trajs, 1)
+            for t in range(self.plan_horizon):
+                pi_actions[t] = self.model.pi(z, 2 * self.cfg.min_std)
+                z, hidden_pi, _ = self.model.next(z, pi_actions[t], hidden_pi)
+
+        # Initialize state and parameters
+        mean = torch.zeros(self.plan_horizon, self.cfg.action_dim, device=self.device)
+        std = 2 * torch.ones(self.plan_horizon, self.cfg.action_dim, device=self.device)
+        if not t0 and hasattr(self, '_prev_mean'):
+            mean[:-1] = self._prev_mean[1:]
+
+        # Iterate CEM
+        for i in range(self.cfg.iterations):
+            # parameterized action of mpc
+            actions = self.sample_action_sequence(self.cfg.num_samples, mean, std)
+            z = self.model.h(obs).repeat(self.cfg.num_samples, 1)
+            hidden_plan = hidden.repeat(self.cfg.num_samples, 1)
+            if num_pi_trajs > 0:
+                num_pi_trajs_sampled = int(num_pi_trajs)
+                actions = torch.cat([actions, pi_actions[:, :num_pi_trajs_sampled]], dim=1)
+                z = self.model.h(obs).repeat(self.cfg.num_samples + num_pi_trajs_sampled, 1)
+                hidden_plan = hidden.repeat(self.cfg.num_samples + num_pi_trajs_sampled, 1)
+
+            # Compute elite actions
+            value, reward_mean = self.estimate_value(z, actions, hidden_plan)
+            elite_idxs = torch.topk(value.squeeze(1), self.cfg.num_elites, dim=0).indices
+            elite_value, elite_actions = value[elite_idxs], actions[:, elite_idxs]  # select action of high value
+
+            # Update parameters
+            max_value = elite_value.max(0)[0]
+            score = torch.exp(self.cfg.temperature * (elite_value - max_value))
+            score /= score.sum(0)
+            _mean = torch.sum(score.unsqueeze(0) * elite_actions, dim=1) / (score.sum(0) + 1e-9)
+            _std = torch.sqrt(torch.sum(score.unsqueeze(0) * (elite_actions - _mean.unsqueeze(1)) ** 2, dim=1) / (
+                    score.sum(0) + 1e-9))
+            _std = _std.clamp_(self.std, 2)
+            mean, std = self.cfg.momentum * mean + (1 - self.cfg.momentum) * _mean, _std
+
+        # Outputs
+        score = score.squeeze(1).cpu().numpy()
+        actions = elite_actions[:, np.random.choice(np.arange(score.shape[0]), p=score)]
+        self._prev_mean = mean
+        mean, std = actions[0], _std[0]
+        a = mean
+        if not eval_mode:
+            a += std * torch.randn(self.cfg.action_dim, device=std.device)
+        # step the model to calculate the next hidden state
+        z, hidden, _ = self.model.next(z[0:1], a.unsqueeze(0), hidden)
+
+        plan_metrics.update({'external_reward_mean': reward_mean,
+                             'current_std': std.mean().item()})
+
+        return a, hidden, plan_metrics
+
+    def update_pi_bc(self, zs, input_zs, actions):
+        """Update policy using a sequence of latent states."""
+        self.pi_optim.zero_grad(set_to_none=True)
+        self.model.track_q_grad(False)
+
+        # Loss is a weighted sum of Q-values
+        pi_loss = 0
+        for t, z in enumerate(zs):
+            a = self.model.pi(z, self.cfg.min_std)
+            Q = torch.min(*self.model.Q(z, a))
+            pi_loss += -Q.mean()
+            a_pi = self.model.pi(input_zs[t], self.cfg.min_std)
+            pi_loss += self.cfg.alpha_bc * F.mse_loss(a_pi, actions)
+
+        pi_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model._pi.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
+        self.pi_optim.step()
+        self.model.track_q_grad(True)
+        return pi_loss.item()
 
     def update_pi(self, zs):
         """Update policy using a sequence of latent states."""
@@ -374,6 +467,23 @@ class TdICemSimDssm:
         similarity_loss, reward_loss, value_loss, priority_loss = 0, 0, 0, 0
         hidden = self.model.init_hidden_state(z.shape[0], z.device)
         zs_query, zs_key = [], []
+
+        # calculate next target q for td_lambda
+        next_q_values, outputs = [], []
+        rewards = reward_pi[:self.cfg.horizon]
+        discounts = torch.ones_like(rewards) * self.cfg.discount
+        for t, next_z in enumerate(online_next_zs[:self.cfg.horizon]):
+            with torch.no_grad():
+                next_q_value = torch.min(*self.model_target.Q(next_z, self.model.pi(next_z, self.cfg.min_std)))
+            next_q_values.append(next_q_value)
+        next_q_values = torch.stack(next_q_values, dim=0)
+        last = next_q_values[-1]
+        inputs = rewards + discounts * next_q_values * (1 - self.cfg.td_lambda)
+        for index in reversed(range(next_q_values.shape[0])):
+            last = inputs[index] + discounts[index] * last * self.cfg.td_lambda
+            outputs.append(last)
+        td_lambda_targets = torch.stack(list(reversed(outputs)), dim=0)
+
         for t in range(self.cfg.horizon):
             # Predictions
             rho = (self.cfg.rho ** t)
@@ -381,12 +491,9 @@ class TdICemSimDssm:
             # reward_loss_shooting = 0
             Q1, Q2 = self.model.Q(z, action[t])
             z, hidden, reward_pred = self.model.next(z, action[t], hidden)
-            # z = self.dyna_aug(z)
-            # dyna_noise = self.aug_generator(z)
-            # z = z + dyna_noise
-            with torch.no_grad():
-                td_target = self._td_target(online_next_zs[t], reward_pi[t])
-            # reward_loss_shooting += h.mse(reward_pred, reward[t])
+            # with torch.no_grad():
+            #     td_target = self._td_target(online_next_zs[t], reward[t])
+            td_target = td_lambda_targets[t]
             reward_loss += h.mse(reward_pred, reward[t])
             value_loss += (h.mse(Q1, td_target) + h.mse(Q2, td_target))
             priority_loss += (h.l1(Q1, td_target) + h.l1(Q2, td_target))
@@ -416,10 +523,11 @@ class TdICemSimDssm:
                                                                           -1).sum(dim=0)  # (batch_size, )
 
         # Optimize model
-        total_loss = self.cfg.similarity_coef * similarity_loss.clamp(max=1e4) + \
-                     self.cfg.reward_coef * reward_loss.clamp(max=1e4) + \
-                     self.cfg.value_coef * value_loss.clamp(max=1e4)
-        weighted_loss = (total_loss * weights).mean()
+        model_loss = self.cfg.similarity_coef * similarity_loss.clamp(max=1e4) + \
+                     self.cfg.reward_coef * reward_loss.clamp(max=1e4)
+        td_loss = self.cfg.value_coef * value_loss.clamp(max=1e4)
+        total_loss = model_loss + td_loss
+        weighted_loss = (model_loss * weights).mean() + td_loss.mean()
         weighted_loss.register_hook(lambda grad: grad * (1 / self.cfg.horizon))
         weighted_loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip_norm,
@@ -440,6 +548,6 @@ class TdICemSimDssm:
                 'total_loss': float(total_loss.mean().item()),
                 'weighted_loss': float(weighted_loss.mean().item()),
                 'grad_norm': float(grad_norm),
-                # 'intrinsic_batch_reward_mean': intrinsic_rewards.mean().item(),
-                # 'current_explore_coef': self.explore_coef,
+                'intrinsic_batch_reward_mean': intrinsic_rewards.mean().item(),
+                'current_explore_coef': self.explore_coef,
                 'mixture_coef': self.mixture_coef}
